@@ -1,8 +1,10 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #000000;
+  --foreground: #ffffff;
+  --neon-blue: #00d9ff;
+  --neon-blue-dark: #00b8d9;
 }
 
 @theme inline {
@@ -12,15 +14,221 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Glassmorphism utility class */
+.glass {
+  background: rgba(10, 10, 10, 0.4);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-strong {
+  background: rgba(10, 10, 10, 0.6);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Animated border gradient */
+@keyframes border-glow {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.animated-border {
+  position: relative;
+  background: linear-gradient(90deg, #00d9ff, #0099ff, #00d9ff, #0099ff);
+  background-size: 300% 300%;
+  animation: border-glow 3s ease infinite;
+  padding: 2px;
+  border-radius: 1rem;
+}
+
+.animated-border-content {
+  background: rgba(10, 10, 10, 0.4);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-radius: calc(1rem - 2px);
+}
+
+/* Zoom in animation */
+@keyframes zoom-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.zoom-in {
+  animation: zoom-in 0.5s ease-out forwards;
+}
+
+/* Video background overlay */
+.video-background-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.85) 0%,
+    rgba(0, 0, 0, 0.7) 50%,
+    rgba(0, 0, 0, 0.85) 100%
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Pulse animation for background */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.05);
+  }
+}
+
+/* Animated gradient background */
+.animated-gradient-bg {
+  background: radial-gradient(circle at 20% 50%, rgba(0, 217, 255, 0.15) 0%, transparent 50%), 
+              radial-gradient(circle at 80% 80%, rgba(0, 153, 255, 0.15) 0%, transparent 50%), 
+              radial-gradient(circle at 40% 20%, rgba(100, 0, 255, 0.1) 0%, transparent 50%);
+  animation: pulse 8s ease-in-out infinite;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 10, 10, 0.5);
+  backdrop-filter: blur(10px);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 217, 255, 0.3);
+  border-radius: 4px;
+  backdrop-filter: blur(10px);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 217, 255, 0.5);
+}
+
+/* Engine Logo Cards - Optimized Hover Effects */
+.engine-logo-card {
+  transition: box-shadow 0.3s ease-in-out, border-color 0.3s ease-in-out, background-color 0.3s ease-in-out, transform 0.3s ease-in-out;
+  position: relative;
+  will-change: transform, box-shadow;
+}
+
+.engine-logo-card:hover {
+  box-shadow: 0 0 20px var(--brand-glow, rgba(255, 255, 255, 0.3)), 0 0 40px var(--brand-glow-soft, rgba(255, 255, 255, 0.2)) !important;
+  border-color: var(--brand-color, rgba(255, 255, 255, 0.3)) !important;
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.engine-icon {
+  transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out, filter 0.3s ease-in-out;
+  will-change: opacity, transform, filter;
+}
+
+.engine-logo-card:hover .engine-icon {
+  opacity: 1 !important;
+  transform: scale(1.1) !important;
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 16px rgba(255, 255, 255, 0.6)) !important;
+}
+
+/* LED Border Animation */
+@keyframes led-rotate {
+  0% {
+    background-position: 0% 0%;
+  }
+  25% {
+    background-position: 100% 0%;
+  }
+  50% {
+    background-position: 100% 100%;
+  }
+  75% {
+    background-position: 0% 100%;
+  }
+  100% {
+    background-position: 0% 0%;
+  }
+}
+
+.led-border {
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--brand-color, #00d9ff) 25%,
+    transparent 50%,
+    var(--brand-color, #00d9ff) 75%,
+    transparent 100%
+  );
+  background-size: 400% 400%;
+  animation: led-rotate 2s linear infinite;
+  z-index: -1;
+  opacity: 0.8;
+  filter: blur(1px);
+}
+
+.led-border::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.95);
+}
+
+/* Info Tag Animation */
+.info-tag {
+  transition: all 0.3s ease-in-out;
+}
+
+.info-tag div {
+  transform: translateY(-4px);
+  transition: transform 0.3s ease-in-out;
+}
+
+.engine-logo-card:hover .info-tag {
+  transform: translateY(0);
+}
+
+/* Tool Card Icons - Optimized White Glow Effect */
+.tool-icon {
+  transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out, filter 0.3s ease-in-out;
+  opacity: 0.8;
+  will-change: opacity, transform, filter;
+}
+
+.tool-card:hover .tool-icon {
+  opacity: 1;
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.6)) drop-shadow(0 0 16px rgba(255, 255, 255, 0.3));
+  transform: scale(1.1);
 }
