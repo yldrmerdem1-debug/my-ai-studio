@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
+import { Video, Camera, Lightbulb, Film, User, Music, Building2 } from 'lucide-react';
 
 interface ImageSequence {
   id: string;
@@ -89,6 +90,9 @@ export default function VideoPage() {
       const proceed = confirm('No images uploaded. Continue with text-to-video generation?');
       if (!proceed) return;
     }
+
+    // Disable button immediately to prevent multiple requests
+    setIsGenerating(true);
 
     // Add user message to chat
     const userMessage: ChatMessage = {
@@ -184,16 +188,71 @@ export default function VideoPage() {
       setGenerationStatus('Starting video generation...');
       setGenerationProgress(40);
 
-      const videoResponse = await fetch('/api/generate-video', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      });
+      // Retry logic for 429 errors
+      let videoResponse;
+      let retryCount = 0;
+      const maxRetries = 1; // Retry once
 
-      if (!videoResponse.ok) {
-        const error = await videoResponse.json();
+      // Helper to extract retry_after duration from response
+      const getRetryAfter = (response: Response): number => {
+        const retryAfterHeader = response.headers.get('retry-after');
+        if (retryAfterHeader) {
+          const retryAfter = parseInt(retryAfterHeader, 10);
+          if (!isNaN(retryAfter) && retryAfter > 0) {
+            return retryAfter * 1000; // Convert to milliseconds
+          }
+        }
+        // Default to 5 seconds if not specified
+        return 5000;
+      };
+
+      while (retryCount <= maxRetries) {
+        try {
+          videoResponse = await fetch('/api/generate-video', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody),
+          });
+
+          // If 429 error and we haven't retried yet, wait and retry
+          if (videoResponse.status === 429 && retryCount < maxRetries) {
+            const retryAfter = getRetryAfter(videoResponse);
+            const retrySeconds = Math.ceil(retryAfter / 1000);
+            setGenerationStatus(`Replicate is processing other requests. Retrying in ${retrySeconds} seconds...`);
+            setGenerationProgress(40);
+            
+            // Wait for retry_after duration before retrying
+            await new Promise(resolve => setTimeout(resolve, retryAfter));
+            
+            retryCount++;
+            setGenerationStatus('Retrying video generation request...');
+            continue;
+          }
+
+          // If not 429 or we've already retried, break out of loop
+          break;
+        } catch (fetchError: any) {
+          // If it's a network error and we haven't retried, wait and retry
+          if (retryCount < maxRetries) {
+            setGenerationStatus('Replicate is processing other requests. Retrying in 5 seconds...');
+            setGenerationProgress(40);
+            
+            // Wait 5 seconds before retrying (network errors don't have retry_after)
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            retryCount++;
+            setGenerationStatus('Retrying video generation request...');
+            continue;
+          }
+          // If we've already retried or it's not a retryable error, throw it
+          throw fetchError;
+        }
+      }
+
+      if (!videoResponse || !videoResponse.ok) {
+        const error = await videoResponse?.json().catch(() => ({ error: 'Video generation failed' }));
         throw new Error(error.error || 'Video generation failed');
       }
 
@@ -207,7 +266,27 @@ export default function VideoPage() {
 
     } catch (error: any) {
       console.error('Video generation error:', error);
-      alert(`Video generation failed: ${error.message}`);
+      
+      // Check for safety filter error (E005)
+      if (error.message?.includes('E005') || error.message?.toLowerCase().includes('sensitive') || error.message?.toLowerCase().includes('safety')) {
+        alert('Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.');
+        
+        // Add error message to chat
+        const errorMessage: ChatMessage = {
+          id: `msg-${Date.now()}-error`,
+          role: 'assistant',
+          content: '⚠️ Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.',
+          timestamp: new Date(),
+        };
+        setChatMessages(prev => [...prev, errorMessage]);
+      } else if (error.message?.includes('429') || error.message?.includes('Too Many Requests')) {
+        // Check if it's a 429 error that we couldn't retry
+        alert('Video generation failed: Replicate is currently processing too many requests. Please try again in a few moments.');
+      } else {
+        alert(`Video generation failed: ${error.message}`);
+      }
+      
+      // Always reset generating state so button becomes active again
       setIsGenerating(false);
       setGenerationProgress(0);
       setGenerationStatus('');
@@ -226,8 +305,18 @@ export default function VideoPage() {
         if (data.status === 'succeeded' && data.videoUrl) {
           setGenerationProgress(100);
           setGenerationStatus('Video generation complete!');
-          setVideoUrl(data.videoUrl);
+          const videoUrlResult = data.videoUrl;
+          setVideoUrl(videoUrlResult);
           setIsGenerating(false);
+          
+          // Auto-save to My Assets
+          if (typeof window !== 'undefined') {
+            import('@/lib/assets-storage').then(({ saveVideoAsset }) => {
+              saveVideoAsset(videoUrlResult, `AI Video - ${new Date().toLocaleDateString()}`, {
+                model: 'minimax/video-01',
+              });
+            });
+          }
           
           // Add success message to chat
           const successMessage: ChatMessage = {
@@ -241,7 +330,12 @@ export default function VideoPage() {
         }
 
         if (data.status === 'failed') {
-          throw new Error(data.error || 'Video generation failed');
+          const errorMessage = data.error || 'Video generation failed';
+          // Check for safety filter error (E005) or sensitive content
+          if (errorMessage.includes('E005') || errorMessage.toLowerCase().includes('sensitive') || errorMessage.toLowerCase().includes('safety')) {
+            throw new Error('SAFETY_FILTER_E005');
+          }
+          throw new Error(errorMessage);
         }
 
         // Update progress based on status
@@ -259,8 +353,29 @@ export default function VideoPage() {
         }
       } catch (error: any) {
         console.error('Polling error:', error);
-        setGenerationStatus(`Error: ${error.message}`);
+        
+        // Check for safety filter error (E005)
+        if (error.message === 'SAFETY_FILTER_E005' || error.message?.includes('E005') || error.message?.toLowerCase().includes('sensitive') || error.message?.toLowerCase().includes('safety')) {
+          setGenerationStatus('Güvenlik filtresi hatası');
+          alert('Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.');
+          
+          // Add error message to chat
+          const errorMessage: ChatMessage = {
+            id: `msg-${Date.now()}-error`,
+            role: 'assistant',
+            content: '⚠️ Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.',
+            timestamp: new Date(),
+          };
+          setChatMessages(prev => [...prev, errorMessage]);
+        } else {
+          setGenerationStatus(`Error: ${error.message}`);
+          alert(`Video generation failed: ${error.message}`);
+        }
+        
+        // Always reset generating state so button becomes active again
         setIsGenerating(false);
+        setGenerationProgress(0);
+        setGenerationStatus('');
       }
     };
 
@@ -605,7 +720,7 @@ export default function VideoPage() {
                   isGenerating ? 'opacity-50 cursor-not-allowed' : ''
                 }`}
               >
-                📸 Upload Images (Multiple)
+                <Camera className="w-4 h-4 inline mr-2" /> Upload Images (Multiple)
               </label>
               <p className="text-xs text-gray-400 mt-2">
                 Upload images to reference in your chat. Reference them as "Image 1", "Image 2", etc. in your chat commands. Images are optional - you can also generate videos purely from text.

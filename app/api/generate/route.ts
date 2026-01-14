@@ -4,11 +4,12 @@ import { translate } from '@vitalets/google-translate-api';
 import sharp from 'sharp';
 
 // Map action types to Replicate models
+// Updated to use the specific models requested by the user
 const MODEL_MAP: Record<string, string> = {
-  'remove-background': 'cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003',
+  'remove-background': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
   'studio-background': 'runwayml/stable-diffusion-inpainting:95b7223104132405a9ae91cc677285bc5eb997834bd2349c2b5a1ae1b1717942', // Inpainting model with mask support
-  'mask-generation': 'cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003', // For generating masks
-  'background-removal': 'cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003', // For subject extraction
+  'mask-generation': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg for mask generation
+  'background-removal': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
   '3d-motion': 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438',
   'ad-script': 'meta/llama-3.1-8b-instruct:af1c688b4a10d836358128ace4b7821950d6cbcd3d4532511146196b3b7c5c2b',
 };

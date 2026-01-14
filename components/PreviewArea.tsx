@@ -27,8 +27,6 @@ const downloadImage = async (imageUrl: string, filename: string = 'ai-result') =
     document.body.removeChild(link);
     URL.revokeObjectURL(blobUrl);
   } catch (error) {
-    console.error('Error downloading image:', error);
-    // Fallback: open in new tab
     window.open(imageUrl, '_blank');
   }
 };

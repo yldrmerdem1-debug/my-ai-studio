@@ -1,80 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
-import { translate } from '@vitalets/google-translate-api';
-
-/**
- * Translates text to English if it's not already in English
- * Ensures Replicate models receive English prompts for best results
- */
-async function translateToEnglish(text: string): Promise<string> {
-  try {
-    if (!text || text.trim().length === 0) {
-      return text;
-    }
-
-    const englishPattern = /^[a-zA-Z0-9\s.,!?'"()-]+$/;
-    const isAsciiOnly = englishPattern.test(text);
-    
-    const commonEnglishWords = [
-      'ad', 'script', 'advertisement', 'promotional', 'marketing', 'product', 'service',
-      'compelling', 'engaging', 'persuasive', 'tone', 'audience', 'call', 'action',
-      'professional', 'humorous', 'energetic', 'buy', 'learn', 'sign', 'up'
-    ];
-    
-    const lowerText = text.toLowerCase();
-    const hasEnglishWords = commonEnglishWords.some(word => lowerText.includes(word));
-    
-    if (isAsciiOnly && hasEnglishWords) {
-      return text;
-    }
-    
-    if (!isAsciiOnly || !hasEnglishWords) {
-      console.log('Translating ad script prompt to English...');
-      const translationPromise = translate(text, { to: 'en' });
-      const timeoutPromise = new Promise<string>((_, reject) => 
-        setTimeout(() => reject(new Error('Translation timeout')), 5000)
-      );
-      
-      const result = await Promise.race([translationPromise, timeoutPromise]) as any;
-      return result.text || text;
-    }
-    
-    return text;
-  } catch (error: any) {
-    console.warn('Translation unavailable, using original text:', error.message);
-    return text;
-  }
-}
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export async function POST(request: NextRequest) {
   try {
-    // Get API token from environment
-    const apiToken = process.env.REPLICATE_API_TOKEN;
+    // Get API key from environment
+    const apiKey = process.env.GEMINI_API_KEY;
     
     // Validate token exists
-    if (!apiToken || apiToken.trim() === '') {
-      console.error('REPLICATE_API_TOKEN not found in environment');
+    if (!apiKey || apiKey.trim() === '') {
+      console.error('GEMINI_API_KEY not found in environment');
       return NextResponse.json(
         {
           error: 'API token not configured',
-          details: 'Please set REPLICATE_API_TOKEN in your .env.local file and restart your dev server'
+          details: 'Please set GEMINI_API_KEY in your .env.local file and restart your dev server'
         },
         { status: 500 }
       );
     }
 
-    // Validate token format
-    if (!apiToken.startsWith('r8_')) {
-      return NextResponse.json(
-        { error: 'Invalid API token format' },
-        { status: 500 }
-      );
-    }
-
-    // Initialize Replicate client
-    const replicate = new Replicate({
-      auth: apiToken.trim(),
-    });
+    // Initialize Gemini
+    const genAI = new GoogleGenerativeAI(apiKey.trim());
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
     const { prompt, context } = await request.json();
 
@@ -85,14 +31,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Translate prompt to English
-    let translatedPrompt = prompt;
-    console.log('Original prompt (any language):', translatedPrompt);
-    translatedPrompt = await translateToEnglish(translatedPrompt);
-    console.log('Translated prompt (English):', translatedPrompt);
-
     // Build enhanced prompt with context
-    let enhancedPrompt = translatedPrompt;
+    let enhancedPrompt = prompt;
 
     // Add contextual information to the prompt if provided
     if (context) {
@@ -124,85 +64,39 @@ export async function POST(request: NextRequest) {
       }
 
       if (contextInstructions.length > 0) {
-        enhancedPrompt = `${translatedPrompt}\n\nAdditional instructions: ${contextInstructions.join('. ')}.`;
+        enhancedPrompt = `${prompt}\n\nAdditional instructions: ${contextInstructions.join('. ')}.`;
       }
     }
 
-    console.log('Enhanced prompt with context:', enhancedPrompt);
+    // Build the full prompt for Gemini
+    const fullPrompt = `You are an expert copywriter specializing in creating compelling, persuasive ad scripts for marketing and advertising.
 
-    // Use Llama 3.1 8B Instruct model for text generation
-    const model = 'meta/llama-3.1-8b-instruct:af1c688b4a10d836358128ace4b7821950d6cbcd3d4532511146196b3b7c5c2b';
-
-    // Build the prompt for the LLM
-    // Llama 3.1 Instruct models use a simpler prompt format
-    const fullPrompt = `You are an expert copywriter specializing in creating compelling, persuasive ad scripts.
-
-Create an engaging ad script based on the following description and requirements:
+Create an engaging, high-converting ad script based on the following description and requirements:
 
 ${enhancedPrompt}
 
-Make sure the script is clear, persuasive, and includes all necessary elements like hooks, benefits, and call-to-action. Format the script in a way that's ready to use for voice-over or video production.`;
+Make sure the script is:
+- Clear and persuasive
+- Includes a strong hook to grab attention
+- Highlights key benefits and features
+- Includes a clear call-to-action
+- Optimized for voice-over or video production
+- Ready to use immediately
 
-    console.log('Full prompt for ad script:', fullPrompt);
+Format the script in a way that's ready to use for voice-over or video production.`;
 
-    // Create prediction
-    const prediction = await replicate.predictions.create({
-      version: model,
-      input: {
-        prompt: fullPrompt,
-        max_tokens: 1000,
-        temperature: 0.7,
-      },
-    });
+    console.log('Generating ad script with Gemini 1.5 Pro...');
 
-    console.log('Ad script generation started, ID:', prediction.id);
-
-    // Poll for completion
-    let result: any = null;
-    let attempts = 0;
-    const maxAttempts = 60; // 5 minutes max (5 second intervals)
-
-    while (attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      result = await replicate.predictions.get(prediction.id);
-
-      if (result.status === 'succeeded' && result.output) {
-        break;
-      }
-      if (result.status === 'failed' || result.status === 'canceled') {
-        throw new Error(`Ad script generation failed: ${result.error || 'Unknown error'}`);
-      }
-      attempts++;
-    }
-
-    if (!result || result.status !== 'succeeded' || !result.output) {
-      throw new Error('Failed to generate ad script: timeout or no output');
-    }
-
-    // Extract script from output
-    // The output might be an array of strings or a single string
-    let script = '';
-    if (Array.isArray(result.output)) {
-      script = result.output.join('\n');
-    } else if (typeof result.output === 'string') {
-      script = result.output;
-    } else {
-      script = JSON.stringify(result.output);
-    }
-
-    // Clean up the script (remove any LLM formatting artifacts)
-    script = script.trim();
-    
-    // Remove common LLM response markers if present
-    script = script.replace(/^<\|start_header_id\|>assistant<\|end_header_id\|>\n\n/, '');
-    script = script.replace(/<\|eot_id\|>.*$/, '');
-    script = script.trim();
+    // Generate content with Gemini
+    const result = await model.generateContent(fullPrompt);
+    const response = await result.response;
+    const script = response.text();
 
     console.log('Ad script generated successfully');
     console.log('Script length:', script.length, 'characters');
 
     return NextResponse.json({
-      script: script,
+      script: script.trim(),
       status: 'succeeded',
     });
 

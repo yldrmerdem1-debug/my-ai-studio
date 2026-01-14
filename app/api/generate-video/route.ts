@@ -3,6 +3,57 @@ import Replicate from 'replicate';
 import { translate } from '@vitalets/google-translate-api';
 
 /**
+ * Helper function to extract retry_after duration from 429 error responses
+ * Returns the retry_after value in milliseconds, or defaults to 5 seconds
+ * Replicate API may return retry_after in headers, response body, or error object
+ */
+function getRetryAfterDuration(error: any): number {
+  // Check for retry_after in error response headers
+  if (error.headers?.get?.('retry-after')) {
+    const retryAfter = parseInt(error.headers.get('retry-after'), 10);
+    if (!isNaN(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000; // Convert to milliseconds
+    }
+  }
+  
+  // Check for retry_after in error response object (direct property)
+  if (error.response?.headers?.get?.('retry-after')) {
+    const retryAfter = parseInt(error.response.headers.get('retry-after'), 10);
+    if (!isNaN(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+  }
+  
+  // Check for retry_after in error body
+  if (error.body?.retry_after) {
+    const retryAfter = parseInt(error.body.retry_after, 10);
+    if (!isNaN(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+  }
+  
+  // Check for retry_after in error data
+  if (error.data?.retry_after) {
+    const retryAfter = parseInt(error.data.retry_after, 10);
+    if (!isNaN(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+  }
+  
+  // Check for retry_after in error message (sometimes included as text)
+  const retryAfterMatch = error.message?.match(/retry[_\s-]?after[:\s]+(\d+)/i);
+  if (retryAfterMatch) {
+    const retryAfter = parseInt(retryAfterMatch[1], 10);
+    if (!isNaN(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+  }
+  
+  // Default to 5 seconds if not specified
+  return 5000;
+}
+
+/**
  * Translates text to English if it's not already in English
  * Ensures Replicate models receive English prompts for best results
  */
@@ -71,10 +122,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Initialize Replicate client
+    // Initialize Replicate client with API token
+    // The SDK automatically handles Authorization header: Token ${apiToken}
     const replicate = new Replicate({
       auth: apiToken.trim(),
     });
+    
+    console.log('Replicate client initialized with token:', apiToken.substring(0, 10) + '...');
 
     // Parse and log request body
     const requestBody = await request.json();
@@ -124,11 +178,12 @@ export async function POST(request: NextRequest) {
       // TEXT-TO-VIDEO MODE: Generate video purely from text prompt
       console.log('TEXT-TO-VIDEO MODE: Generating video from text prompt only');
       
-      // TEXT-TO-VIDEO MODE: Use a text-to-video model
-      // Try models in order of preference
+      // TEXT-TO-VIDEO MODE: Use official video model slugs (no version hashes)
+      // Using model slug format for stability
       const textToVideoModels = [
-        'anotherjesse/zeroscope-v2-xl', // Latest version (most reliable)
-        'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438', // Fallback: SVD (requires image, but we'll generate one)
+        'minimax/video-01', // Primary: Video model
+        'lucataco/luma-dream-machine', // Secondary: Official Luma model
+        'kling-ai/kling-v1', // Tertiary: Official Kling model
       ];
       
       let lastError: any = null;
@@ -137,44 +192,102 @@ export async function POST(request: NextRequest) {
         try {
           console.log(`Attempting text-to-video with model: ${modelOption}`);
           
-          // Zeroscope-v2-xl parameters
-          // This model accepts prompt for text-to-video generation
+          // Build input parameters - all video models use prompt field
           const videoInput: any = {
-            prompt: translatedPrompt, // Use translated prompt
+            prompt: translatedPrompt, // Send prompt to video model's prompt field
           };
           
-          // Only add optional parameters if model supports them
-          // Some versions don't support width/height/num_frames
+          // Add model-specific parameters if needed
+          if (modelOption.includes('minimax/video-01')) {
+            // Minimax video-01 uses prompt field
+            videoInput.prompt = translatedPrompt;
+          } else if (modelOption.includes('luma-dream-machine')) {
+            // Luma Dream Machine uses prompt field
+            videoInput.prompt = translatedPrompt;
+          } else if (modelOption.includes('kling')) {
+            // Kling uses prompt field
+            videoInput.prompt = translatedPrompt;
+          }
+          
           console.log(`Attempting text-to-video with model: ${modelOption}`);
           console.log('Input parameters:', JSON.stringify(videoInput, null, 2));
+          console.log('Using model identifier format: owner/model-name');
           
-          videoPrediction = await replicate.predictions.create({
-            version: modelOption,
-            input: videoInput,
-          });
+          // Retry logic for 429 errors
+          let retryCount = 0;
+          let predictionSuccess = false;
           
-          console.log(`✓ Successfully started text-to-video with ${modelOption}`);
-          console.log('Prediction ID:', videoPrediction.id);
-          console.log('Prediction Status:', videoPrediction.status);
-          break;
+          while (retryCount <= 1 && !predictionSuccess) {
+            try {
+              // Use model name directly in version field (Replicate SDK accepts this)
+              videoPrediction = await replicate.predictions.create({
+                version: modelOption, // Format: owner/model-name (e.g., lucataco/luma-dream-machine)
+                input: videoInput,
+              });
+              
+              predictionSuccess = true;
+              console.log(`✓ Successfully started text-to-video with ${modelOption}`);
+              console.log('Prediction ID:', videoPrediction.id);
+              console.log('Prediction Status:', videoPrediction.status);
+              break;
+            } catch (createError: any) {
+              // Check if it's a 429 error
+              if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
+                const retryAfter = getRetryAfterDuration(createError);
+                console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
+                await new Promise(resolve => setTimeout(resolve, retryAfter));
+                retryCount++;
+                continue;
+              }
+              // If not 429 or we've already retried, throw the error
+              throw createError;
+            }
+          }
+          
+          if (predictionSuccess) {
+            break;
+          }
         } catch (modelError: any) {
           console.error(`Model ${modelOption} failed:`, modelError.message);
           console.error('Error details:', modelError);
           lastError = modelError;
           
-          // Try with minimal parameters (just prompt)
+          // Try with minimal parameters (just prompt) - with retry logic
           try {
             console.log(`Retrying ${modelOption} with minimal parameters...`);
             const altInput: any = {
               prompt: translatedPrompt,
             };
-            videoPrediction = await replicate.predictions.create({
-              version: modelOption,
-              input: altInput,
-            });
-            console.log(`✓ Successfully started text-to-video with ${modelOption} (minimal params)`);
-            console.log('Prediction ID:', videoPrediction.id);
-            break;
+            
+            let retryCount = 0;
+            let predictionSuccess = false;
+            
+            while (retryCount <= 1 && !predictionSuccess) {
+              try {
+                videoPrediction = await replicate.predictions.create({
+                  version: modelOption,
+                  input: altInput,
+                });
+                predictionSuccess = true;
+                console.log(`✓ Successfully started text-to-video with ${modelOption} (minimal params)`);
+                console.log('Prediction ID:', videoPrediction.id);
+                break;
+              } catch (createError: any) {
+                // Check if it's a 429 error
+                if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
+                  const retryAfter = getRetryAfterDuration(createError);
+                  console.log(`429 error from Replicate (minimal params), waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
+                  await new Promise(resolve => setTimeout(resolve, retryAfter));
+                  retryCount++;
+                  continue;
+                }
+                throw createError;
+              }
+            }
+            
+            if (predictionSuccess) {
+              break;
+            }
           } catch (altError: any) {
             console.error(`Alt params also failed for ${modelOption}:`, altError.message);
             console.error('Alt error details:', altError);
@@ -184,66 +297,16 @@ export async function POST(request: NextRequest) {
       }
       
       if (!videoPrediction) {
-        // Final fallback: Generate image first, then convert to video
-        console.log('Text-to-video models failed, using image-to-video fallback...');
-        console.log('Generating image from prompt first, then converting to video...');
-        
-        const imageModel = 'stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b';
-        const imagePrediction = await replicate.predictions.create({
-          version: imageModel,
-          input: {
-            prompt: translatedPrompt,
-            num_outputs: 1,
-            guidance_scale: 7.5,
-            num_inference_steps: 30,
-          },
-        });
-
-        let imageResult: any = null;
-        let imageAttempts = 0;
-        const maxImageAttempts = 30;
-
-        while (imageAttempts < maxImageAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          imageResult = await replicate.predictions.get(imagePrediction.id);
-
-          if (imageResult.status === 'succeeded' && imageResult.output) {
-            break;
-          }
-          if (imageResult.status === 'failed' || imageResult.status === 'canceled') {
-            throw new Error(`Image generation failed: ${imageResult.error || 'Unknown error'}`);
-          }
-          imageAttempts++;
-        }
-
-        if (!imageResult || imageResult.status !== 'succeeded' || !imageResult.output) {
-          throw new Error('Failed to generate image for text-to-video fallback');
-        }
-
-        const finalProcessingUrl = Array.isArray(imageResult.output) ? imageResult.output[0] : imageResult.output;
-        console.log('Image generated for video:', finalProcessingUrl);
-
-        // Now generate video from the image (fallback for text-to-video)
-        const videoModel = 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438';
-        videoPrediction = await replicate.predictions.create({
-          version: videoModel,
-          input: {
-            image: finalProcessingUrl, // Use generated image
-            motion_bucket_id: 127,
-            cond_aug: 0.02,
-            decoding_t: 14,
-            num_frames: 25,
-          },
-        });
-        
-        console.log('✓ Using image-to-video fallback for text-to-video mode');
+        // All text-to-video models failed
+        throw new Error('All text-to-video models failed. Please try again or check your prompt.');
       }
       
     } else if (isMultiImageMode) {
       // MULTI-IMAGE MODE: Generate video sequence from multiple images
       console.log(`Processing ${images.length} images for video sequence...`);
 
-      const videoModel = 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438';
+        // Use video model for image-to-video conversion
+      const videoModel = 'minimax/video-01'; // Use video model (slug format, no version hash)
       
       // Strategy: Use the first image as the starting frame
       // The prompt describes the full sequence including image references
@@ -267,95 +330,152 @@ export async function POST(request: NextRequest) {
         image: '[BASE64_IMAGE_DATA]', // Don't log full base64
       }, null, 2));
 
-      videoPrediction = await replicate.predictions.create({
-        version: videoModel,
-        input: videoInput,
-      });
-
-      console.log('Multi-image prediction created:', videoPrediction.id);
+      // Retry logic for 429 errors
+      let multiImageRetryCount = 0;
+      let multiImagePredictionSuccess = false;
+      
+      while (multiImageRetryCount <= 1 && !multiImagePredictionSuccess) {
+        try {
+          videoPrediction = await replicate.predictions.create({
+            version: videoModel,
+            input: videoInput,
+          });
+          multiImagePredictionSuccess = true;
+          console.log('Multi-image prediction created:', videoPrediction.id);
+        } catch (createError: any) {
+          // Check if it's a 429 error
+          if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && multiImageRetryCount < 1) {
+            const retryAfter = getRetryAfterDuration(createError);
+            console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${multiImageRetryCount + 1}...`);
+            await new Promise(resolve => setTimeout(resolve, retryAfter));
+            multiImageRetryCount++;
+            continue;
+          }
+          throw createError;
+        }
+      }
 
       console.log('Multi-image video generation started with first frame');
       
     } else {
-      // SINGLE-IMAGE MODE: Generate image first if trigger word provided, then video
+      // SINGLE-IMAGE MODE: Use uploaded image or generate video directly from text prompt
+      // If no image uploaded, use text-to-video models directly
       let videoInputImage: string | null = null;
 
-      if (triggerWord) {
-        console.log('Generating image with persona first...');
-        
-        const imageModel = 'stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b';
-        
-        const imagePrediction = await replicate.predictions.create({
-          version: imageModel,
-          input: {
-            prompt: translatedPrompt,
-            num_outputs: 1,
-            guidance_scale: 7.5,
-            num_inference_steps: 30,
-          },
-        });
-
-        let imageResult: any = null;
-        let imageAttempts = 0;
-        const maxImageAttempts = 30;
-
-        while (imageAttempts < maxImageAttempts) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          imageResult = await replicate.predictions.get(imagePrediction.id);
-
-          if (imageResult.status === 'succeeded' && imageResult.output) {
-            break;
-          }
-          if (imageResult.status === 'failed' || imageResult.status === 'canceled') {
-            throw new Error(`Image generation failed: ${imageResult.error || 'Unknown error'}`);
-          }
-          imageAttempts++;
-        }
-
-        if (!imageResult || imageResult.status !== 'succeeded' || !imageResult.output) {
-          throw new Error('Failed to generate image with persona');
-        }
-
-        videoInputImage = Array.isArray(imageResult.output) ? imageResult.output[0] : imageResult.output;
-        console.log('Image generated:', videoInputImage);
-      }
-
-      // SINGLE-IMAGE MODE: Use uploaded image or generated image with persona
-      const videoModel = 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438';
-      
-      // If we have an uploaded image, use it directly (override persona-generated image if both exist)
+      // If we have an uploaded image, use it for image-to-video
       if (images && images.length > 0) {
         videoInputImage = images[0];
         console.log('Using uploaded image for video generation');
-      }
-
-      const videoInput: any = {
-        motion_bucket_id: 127,
-        cond_aug: 0.02,
-        decoding_t: 14,
-        num_frames: 25,
-      };
-
-      if (videoInputImage) {
-        videoInput.image = videoInputImage;
+        
+        // Use image-to-video model
+        const videoModel = 'minimax/video-01'; // Use video model (slug format, no version hash)
+        
+        const videoInput: any = {
+          image: videoInputImage,
+        };
+        
+        // Add optional parameters if model supports them
+        // Some models may not support all parameters
         console.log('Single-image video input with image URL');
+        console.log('Using model:', videoModel);
+        
+        // Retry logic for 429 errors
+        let singleVideoRetryCount = 0;
+        let singleVideoPredictionSuccess = false;
+        
+        while (singleVideoRetryCount <= 1 && !singleVideoPredictionSuccess) {
+          try {
+            videoPrediction = await replicate.predictions.create({
+              version: videoModel,
+              input: videoInput,
+            });
+            singleVideoPredictionSuccess = true;
+            console.log('Single-image prediction created:', videoPrediction.id);
+            break;
+          } catch (createError: any) {
+            // Check if it's a 429 error
+            if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && singleVideoRetryCount < 1) {
+              const retryAfter = getRetryAfterDuration(createError);
+              console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${singleVideoRetryCount + 1}...`);
+              await new Promise(resolve => setTimeout(resolve, retryAfter));
+              singleVideoRetryCount++;
+              continue;
+            }
+            throw createError;
+          }
+        }
       } else {
-        // This shouldn't happen in single-image mode, but handle it
-        console.warn('No image URL in single-image mode, using prompt fallback');
-        videoInput.prompt = translatedPrompt;
+        // No image uploaded - use text-to-video models directly
+        // This handles persona/trigger word scenarios
+        console.log('No image uploaded, using text-to-video models directly');
+        console.log('Prompt includes trigger word:', triggerWord || 'None');
+        
+        // Use the same text-to-video models as text-only mode
+        const textToVideoModels = [
+          'minimax/video-01', // Primary: Video model
+          'lucataco/luma-dream-machine', // Secondary: Official Luma model
+          'kling-ai/kling-v1', // Tertiary: Official Kling model
+        ];
+        
+        let lastError: any = null;
+        
+        for (const modelOption of textToVideoModels) {
+          try {
+            console.log(`Attempting text-to-video with model: ${modelOption}`);
+            
+            const videoInput: any = {
+              prompt: translatedPrompt, // Prompt already includes trigger word if provided
+            };
+            
+            console.log('Input parameters:', JSON.stringify(videoInput, null, 2));
+            
+            // Retry logic for 429 errors
+            let retryCount = 0;
+            let predictionSuccess = false;
+            
+            while (retryCount <= 1 && !predictionSuccess) {
+              try {
+                videoPrediction = await replicate.predictions.create({
+                  version: modelOption,
+                  input: videoInput,
+                });
+                
+                predictionSuccess = true;
+                console.log(`✓ Successfully started text-to-video with ${modelOption}`);
+                console.log('Prediction ID:', videoPrediction.id);
+                break;
+              } catch (createError: any) {
+                // Check if it's a 429 error
+                if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
+                  const retryAfter = getRetryAfterDuration(createError);
+                  console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
+                  await new Promise(resolve => setTimeout(resolve, retryAfter));
+                  retryCount++;
+                  continue;
+                }
+                throw createError;
+              }
+            }
+            
+            if (predictionSuccess) {
+              break;
+            }
+          } catch (modelError: any) {
+            console.error(`Model ${modelOption} failed:`, modelError.message);
+            lastError = modelError;
+            continue;
+          }
+        }
+        
+        if (!videoPrediction) {
+          throw new Error('All text-to-video models failed. Please try again or check your prompt.');
+        }
       }
 
-      console.log('Single-image video input:', JSON.stringify({
-        ...videoInput,
-        image: videoInput.image ? '[IMAGE_URL]' : undefined,
-      }, null, 2));
+    }
 
-      videoPrediction = await replicate.predictions.create({
-        version: videoModel,
-        input: videoInput,
-      });
-
-      console.log('Single-image prediction created:', videoPrediction.id);
+    if (!videoPrediction) {
+      throw new Error('Failed to create video prediction after all retries');
     }
 
     console.log('=== VIDEO GENERATION SUCCESS ===');
@@ -387,20 +507,39 @@ export async function POST(request: NextRequest) {
     // Check if it's a 422 error from Replicate
     if (error.status === 422 || error.message?.includes('422')) {
       console.error('422 Unprocessable Entity - Request format issue');
+      console.error('Error details:', JSON.stringify(error, null, 2));
       console.error('This usually means:');
-      console.error('1. Model version string is incorrect');
+      console.error('1. Model name/version is incorrect or invalid');
       console.error('2. Input parameters don\'t match model requirements');
       console.error('3. Image format is invalid');
       console.error('4. Missing required parameters');
+      console.error('5. Model name format should be: owner/model-name (e.g., lucataco/luma-dream-machine)');
+      
+      // Return more detailed error for 422
+      const errorMessage = error.message || 'Invalid model version or request format';
+      const errorDetails = error.detail || error.toString();
+      
+      return NextResponse.json(
+        { 
+          error: errorMessage,
+          details: errorDetails,
+          statusCode: 422,
+          suggestion: 'Please verify the model name is correct. Use format: owner/model-name (e.g., lucataco/luma-dream-machine or kling-ai/kling-v1). Check Replicate documentation for available models.'
+        },
+        { status: 422 }
+      );
     }
 
+    // Preserve 429 status code for frontend retry logic
+    const statusCode = error.status || 500;
+    
     return NextResponse.json(
       { 
         error: error.message || 'Failed to start video generation',
         details: error.toString(),
-        statusCode: error.status || 500,
+        statusCode: statusCode,
       },
-      { status: error.status || 500 }
+      { status: statusCode }
     );
   }
 }

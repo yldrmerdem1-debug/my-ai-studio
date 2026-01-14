@@ -5,6 +5,7 @@ import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import JSZip from 'jszip';
+import { Sparkles, Camera, Target } from 'lucide-react';
 
 export default function PersonaPage() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
@@ -320,7 +321,7 @@ export default function PersonaPage() {
               ← Back to Studio
             </Link>
             <div className="flex items-center gap-3 mb-2">
-              <span className="text-3xl">✨</span>
+              <Sparkles className="w-8 h-8 text-[#00d9ff]" style={{ filter: 'drop-shadow(0 0 8px #00d9ff)' }} />
               <h1 className="text-4xl font-bold text-white">
                 <span className="bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] bg-clip-text text-transparent">
                   AI Persona Lab
@@ -342,8 +343,8 @@ export default function PersonaPage() {
               Upload 10-20 high-quality images of yourself or the subject you want to train. 
               Use clear, well-lit photos from different angles for best results.
             </p>
-            <p className="text-sm text-[#00d9ff] mb-6">
-              ✨ ZIP file will be created automatically - just select your images and click "Train My AI Persona"
+            <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
+              <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
             </p>
 
             {/* File Upload Buttons */}
@@ -359,9 +360,9 @@ export default function PersonaPage() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isTraining}
-                className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                📸 Upload Images (Multiple)
+                <Camera className="w-4 h-4" /> Upload Images (Multiple)
               </button>
 
               <input
@@ -450,7 +451,7 @@ export default function PersonaPage() {
                 {triggerWord && (
                   <div className="mb-6 p-5 bg-gradient-to-r from-[#00d9ff]/20 to-[#0099cc]/20 rounded-xl border-2 border-[#00d9ff]/50 backdrop-blur-sm">
                     <div className="flex items-center gap-2 mb-2">
-                      <span className="text-2xl">🎯</span>
+                      <Target className="w-5 h-5 text-[#00d9ff]" style={{ filter: 'drop-shadow(0 0 6px #00d9ff)' }} />
                       <p className="text-sm font-semibold text-gray-300 uppercase tracking-wide">Your Unique Trigger Word</p>
                     </div>
                     <div className="bg-black/50 rounded-lg p-4 border border-[#00d9ff]/30">

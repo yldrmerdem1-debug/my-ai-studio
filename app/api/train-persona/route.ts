@@ -63,13 +63,11 @@ export async function POST(request: NextRequest) {
 
     console.log(`Starting training with ${imageCount} images, trigger word: ${triggerWord}`);
 
-    // Use fast-flux-trainer from Replicate
-    // Try replicate/fast-flux-trainer first, fallback to lucataco/flux-dev-lora-trainer
-    // The fast-flux-trainer typically expects a ZIP file URL
+    // Use ostris/flux-dev-lora-trainer as specified by user
     const trainingModelOptions = [
-      'replicate/fast-flux-trainer:latest', // Primary option - the official fast-flux-trainer
-      'lucataco/flux-dev-lora-trainer:latest', // Fallback option
-      'black-forest-labs/flux-dev-trainer:latest', // Alternative fallback
+      'ostris/flux-dev-lora-trainer', // Primary: User-specified model
+      'replicate/fast-flux-trainer:latest', // Fallback option
+      'lucataco/flux-dev-lora-trainer:latest', // Alternative fallback
     ];
     
     let trainingModel = trainingModelOptions[0]; // Start with replicate/fast-flux-trainer
