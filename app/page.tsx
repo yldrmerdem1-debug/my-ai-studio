@@ -1,8 +1,7 @@
 'use client';
-
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { SiOpenai, SiFlux, SiElevenlabs } from 'react-icons/si';
-import { Sparkles, Film, PlayCircle, Zap, Atom, User, Video, Wand2, FileText, Folder, ArrowRight } from 'lucide-react';
+import { Sparkles, Film, PlayCircle, Zap, Atom, User, Video, Wand2, FileText, Folder, ArrowRight, Upload } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import HeroSection from '@/components/HeroSection';
@@ -10,6 +9,25 @@ import Link from 'next/link';
 
 export default function Home() {
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [heroScrollProgress, setHeroScrollProgress] = useState(0);
+  const heroEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Show sidebar after hero section is scrolled past
+    const handleScroll = () => {
+      if (heroEndRef.current) {
+        const rect = heroEndRef.current.getBoundingClientRect();
+        // Show sidebar when hero section is mostly out of view
+        setShowSidebar(rect.top < -100);
+      }
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll(); // Initial check
+
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   const mainRoutes = [
     {
@@ -87,78 +105,135 @@ export default function Home() {
         <div className="absolute top-1/2 left-1/2 w-96 h-96 bg-purple-500/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: '12s', animationDelay: '4s' }} />
       </div>
 
-      <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
+      {/* Sidebar - Hidden initially, appears after hero */}
+      <div 
+        className={`fixed left-0 top-0 z-20 transition-all duration-500 ease-out ${
+          showSidebar ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0'
+        }`}
+      >
+        <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
+      </div>
       
-      <main className="relative z-10 ml-64">
+      <main className={`relative z-10 transition-all duration-500 ease-out ${
+        showSidebar ? 'lg:ml-64' : 'ml-0'
+      }`}>
         {/* Hero Section - Full Screen */}
-        <HeroSection />
+        <HeroSection onScrollProgress={setHeroScrollProgress} />
+        
+        {/* Hero End Marker - Used to detect when to show sidebar */}
+        <div ref={heroEndRef} className="h-0" />
 
-        {/* Main Routes - Large Cards */}
-        <div className="container mx-auto px-8 py-16">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-16">
-            {mainRoutes.map((route) => {
-              const Icon = route.icon;
-              return (
-                <Link
-                  key={route.linkHref}
-                  href={route.linkHref}
-                  className="group relative glass rounded-2xl p-8 border border-white/10 hover:border-[#00d9ff]/50 transition-all hover:scale-105 overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-10 transition-opacity"
-                    style={{
-                      background: `linear-gradient(135deg, ${route.iconColor}20, ${route.iconColor}40)`
-                    }}
-                  />
-                  <div className="relative z-10">
-                    <div
-                      className="flex items-center justify-center w-16 h-16 rounded-lg bg-black/30 border border-white/10 mb-6"
-                      style={{ filter: `drop-shadow(0 0 8px ${route.iconColor})` }}
-                    >
-                      <Icon className="w-8 h-8" style={{ color: route.iconColor }} />
-                    </div>
-                    <h3 className="text-2xl font-bold text-white mb-2">{route.title}</h3>
-                    <p className="text-gray-400 mb-4">{route.description}</p>
-                    <div className="flex items-center gap-2 text-[#00d9ff] group-hover:gap-4 transition-all">
-                      <span className="font-medium">Get Started</span>
-                      <ArrowRight className="w-5 h-5" />
-                    </div>
+        {/* Main Product Section - Upload 20 Photos */}
+        <section className="relative min-h-screen flex items-center justify-center py-32 px-8">
+          <div className="container mx-auto max-w-6xl">
+            <div 
+              className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center"
+              style={{
+                opacity: Math.max(0, Math.min(1, (heroScrollProgress - 0.3) * 2)),
+                transform: `translateY(${Math.max(0, (1 - heroScrollProgress) * 50)}px)`,
+                transition: 'opacity 0.3s ease-out, transform 0.3s ease-out',
+              }}
+            >
+              {/* Left: Visual/Icon */}
+              <div className="flex items-center justify-center lg:justify-start">
+                <div className="relative">
+                  <div className="inline-flex items-center justify-center w-32 h-32 lg:w-40 lg:h-40 rounded-full bg-gradient-to-br from-[#00d9ff]/20 to-[#0099ff]/20 border-2 border-[#00d9ff]/40 backdrop-blur-sm">
+                    <Upload className="w-16 h-16 lg:w-20 lg:h-20 text-[#00d9ff]" />
                   </div>
-                </Link>
-              );
-            })}
-          </div>
+                  {/* Glow effect */}
+                  <div className="absolute inset-0 bg-[#00d9ff]/20 blur-3xl rounded-full -z-10 animate-pulse" style={{ animationDuration: '3s' }} />
+                </div>
+              </div>
 
-          {/* Other Features */}
-          <div className="mb-8">
-            <h2 className="text-2xl font-bold text-white mb-6">More Tools</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {otherFeatures.map((feature) => {
+              {/* Right: Content */}
+              <div className="text-center lg:text-left space-y-8">
+                <div className="space-y-6">
+                  <h2 className="text-4xl lg:text-6xl font-bold text-white leading-tight">
+                    Upload 20 Photos
+                  </h2>
+                  <p className="text-xl lg:text-2xl text-gray-300 leading-relaxed">
+                    Simply upload 20 photos of yourself or your subject. Our AI learns your unique features, expressions, and style.
+                  </p>
+                  <p className="text-lg lg:text-xl text-gray-400 leading-relaxed">
+                    Once trained, your AI persona works across all our creative tools—video generation, image editing, ad creation, and more. One training session, infinite creative possibilities.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Feature Preview Section - Subtle, Secondary */}
+        <section className="relative py-24 px-8">
+          <div className="container mx-auto max-w-7xl">
+            <div className="text-center mb-16">
+              <h2 className="text-3xl lg:text-4xl font-bold text-white mb-4">
+                Powerful Tools at Your Fingertips
+              </h2>
+              <p className="text-lg text-gray-400 max-w-2xl mx-auto">
+                Your trained AI persona works seamlessly across our entire suite of creative tools
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
+              {mainRoutes.map((route, index) => {
+                const Icon = route.icon;
+                return (
+                  <Link
+                    key={route.linkHref}
+                    href={route.linkHref}
+                    className="group relative glass rounded-xl p-6 border border-white/5 hover:border-[#00d9ff]/30 transition-all hover:bg-white/5"
+                    style={{
+                      opacity: 0.7,
+                      animationDelay: `${index * 0.1}s`,
+                    }}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div
+                        className="flex items-center justify-center w-12 h-12 rounded-lg bg-black/30 border border-white/10 flex-shrink-0"
+                        style={{ filter: `drop-shadow(0 0 6px ${route.iconColor})` }}
+                      >
+                        <Icon className="w-6 h-6" style={{ color: route.iconColor }} />
+                      </div>
+                      <div className="flex-1 text-left">
+                        <h4 className="text-lg font-semibold text-white mb-1">{route.title}</h4>
+                        <p className="text-sm text-gray-400">{route.description}</p>
+                      </div>
+                      <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-[#00d9ff] transition-colors opacity-0 group-hover:opacity-100" />
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+
+            {/* Other Features - Even More Subtle */}
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+              {otherFeatures.map((feature, index) => {
                 const Icon = feature.icon;
                 return (
                   <Link
                     key={feature.linkHref}
                     href={feature.linkHref}
-                    className="glass rounded-xl p-6 border border-white/10 hover:border-[#00d9ff]/50 transition-all hover:bg-[#00d9ff]/5 group"
+                    className="group glass rounded-lg p-4 border border-white/5 hover:border-[#00d9ff]/20 transition-all hover:bg-white/5"
+                    style={{
+                      opacity: 0.5,
+                    }}
                   >
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-col items-center text-center gap-2">
                       <div
-                        className="flex items-center justify-center w-12 h-12 rounded-lg bg-black/30 border border-white/10 flex-shrink-0"
-                        style={{ filter: `drop-shadow(0 0 6px ${feature.iconColor})` }}
+                        className="flex items-center justify-center w-10 h-10 rounded-lg bg-black/30 border border-white/10"
+                        style={{ filter: `drop-shadow(0 0 4px ${feature.iconColor})` }}
                       >
-                        <Icon className="w-6 h-6" style={{ color: feature.iconColor }} />
+                        <Icon className="w-5 h-5" style={{ color: feature.iconColor }} />
                       </div>
-                      <div className="flex-1">
-                        <h4 className="text-lg font-semibold text-white mb-1">{feature.title}</h4>
-                        <p className="text-sm text-gray-400">{feature.description}</p>
-                      </div>
-                      <ArrowRight className="w-5 h-5 text-gray-400 group-hover:text-[#00d9ff] transition-colors" />
+                      <h4 className="text-sm font-medium text-white">{feature.title}</h4>
                     </div>
                   </Link>
                 );
               })}
             </div>
           </div>
-        </div>
+        </section>
 
         {/* Professional AI Engine Footer Grid */}
         <div className="container mx-auto px-8 py-16">

@@ -3,10 +3,13 @@
 import { useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
+import { SplineScene } from '@/components/ui/splite';
 import { Box, Upload, Sparkles } from 'lucide-react';
 
 export default function CharacterLabPage() {
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
+  // Example Spline scene URL - replace with your own scene URL
+  const [sceneUrl, setSceneUrl] = useState('https://prod.spline.design/6Wq1Q7YGyM-iab6p/scene.splinecode');
 
   return (
     <div className="flex min-h-screen bg-gradient-to-br from-black via-gray-900 to-black">
@@ -23,6 +26,35 @@ export default function CharacterLabPage() {
             <p className="text-lg text-gray-400">
               Create, rig, and animate high-fidelity 3D assets
             </p>
+          </div>
+
+          {/* Modern Spline Scene - Full Width */}
+          <div className="mb-8">
+            <div className="glass-strong rounded-2xl p-6 border border-white/10">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <Sparkles className="w-6 h-6 text-[#00d9ff]" />
+                  <h2 className="text-2xl font-semibold text-white">3D Scene Preview</h2>
+                </div>
+                <div className="flex-1 max-w-md ml-4">
+                  <input
+                    type="text"
+                    value={sceneUrl}
+                    onChange={(e) => setSceneUrl(e.target.value)}
+                    placeholder="Enter Spline scene URL"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#00d9ff]/50 transition-colors"
+                  />
+                </div>
+              </div>
+              <div className="h-[600px] w-full">
+                <SplineScene 
+                  scene={sceneUrl}
+                  showControls={true}
+                  onLoad={() => console.log('Scene loaded successfully')}
+                  onError={(error) => console.error('Scene error:', error)}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Main Content Area */}
