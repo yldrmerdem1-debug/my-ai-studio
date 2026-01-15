@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     
     const imageFile = formData.get('image') as File;
-    const prompt = (formData.get('prompt') as string) || 'professional studio background';
+    const prompt = (formData.get('prompt') as string) || 'studio lighting, professional environment, commercial-quality image';
 
     if (!imageFile) {
       return NextResponse.json(
@@ -25,11 +25,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // First, remove background using lucataco/remove-bg
+    // Image Studio uses Replicate for image synthesis and AI Persona for identity consistency.
+    // This endpoint preserves the current pipeline while the studio synthesis layer is refined.
+    // First, extract the subject using lucataco/remove-bg
     const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
     const imageBase64 = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
 
-    // Remove background
+    // Extract subject
     const removeBgPrediction = await replicate.predictions.create({
       version: 'lucataco/remove-bg',
       input: {
@@ -37,7 +39,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Poll for background removal completion
+    // Poll for subject extraction completion
     let removeBgResult = removeBgPrediction;
     let attempts = 0;
     while (attempts < 30 && removeBgResult.status !== 'succeeded' && removeBgResult.status !== 'failed') {
@@ -48,22 +50,21 @@ export async function POST(request: NextRequest) {
 
     if (removeBgResult.status !== 'succeeded' || !removeBgResult.output) {
       return NextResponse.json(
-        { error: 'Failed to remove background' },
+        { error: 'Failed to prepare image for studio rendering' },
         { status: 500 }
       );
     }
 
     const transparentImageUrl = Array.isArray(removeBgResult.output) ? removeBgResult.output[0] : removeBgResult.output;
 
-    // For background change, we can use inpainting or compositing
-    // For now, return the transparent image and let the frontend handle compositing
-    // Or use a background generation model
+    // In future: use image-to-image diffusion for studio synthesis and compositing.
+    // For now, return the extracted subject to keep the pipeline stable.
     
     return NextResponse.json({ imageUrl: transparentImageUrl });
   } catch (error: any) {
-    console.error('Background change error:', error);
+    console.error('Image Studio error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to change background' },
+      { error: error.message || 'Failed to generate studio image' },
       { status: 500 }
     );
   }

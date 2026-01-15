@@ -700,14 +700,32 @@ a,
   }
 }
 
+@layer utilities {
+  .video-preview {
+    will-change: transform;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+  .perf-section {
+    content-visibility: auto;
+    contain-intrinsic-size: 800px 1px;
+  }
+  .perf-card {
+    will-change: transform;
+    transform: translateZ(0);
+  }
+  .perf-fixed-bg {
+    transform: translateZ(0);
+    will-change: transform;
+  }
+}
+
 /* Hero Section Animations */
 @keyframes gradient-pulse {
   0%, 100% {
-    opacity: 1;
     transform: translateX(0);
   }
   50% {
-    opacity: 0.7;
     transform: translateX(30px);
   }
 }
@@ -729,6 +747,15 @@ a,
   }
   50% {
     opacity: 1;
+  }
+}
+
+@keyframes glow-drift {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.03);
   }
 }
 

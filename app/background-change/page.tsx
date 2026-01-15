@@ -1,20 +1,33 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Image as ImageIcon, Upload, Sparkles, Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/useToast';
 
-export default function BackgroundChangePage() {
+export default function ImageStudioPage() {
   const { showToast } = useToast();
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
-  const [backgroundPrompt, setBackgroundPrompt] = useState('');
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [studioPrompt, setStudioPrompt] = useState('');
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!uploadedImage) {
+      setUploadedImageUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(uploadedImage);
+    setUploadedImageUrl(objectUrl);
+
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [uploadedImage]);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -24,7 +37,7 @@ export default function BackgroundChangePage() {
     }
   };
 
-  const handleBackgroundChange = async () => {
+  const handleImageStudio = async () => {
     if (!uploadedImage) {
       showToast('Please upload an image first', 'warning');
       return;
@@ -36,7 +49,7 @@ export default function BackgroundChangePage() {
     try {
       const formData = new FormData();
       formData.append('image', uploadedImage);
-      formData.append('prompt', backgroundPrompt);
+      formData.append('prompt', studioPrompt);
 
       const response = await fetch('/api/background-change', {
         method: 'POST',
@@ -45,7 +58,7 @@ export default function BackgroundChangePage() {
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.error || 'Failed to change background');
+        throw new Error(error.error || 'Failed to generate studio image');
       }
 
       const data = await response.json();
@@ -54,13 +67,13 @@ export default function BackgroundChangePage() {
       // Auto-save to My Assets
       if (data.imageUrl && typeof window !== 'undefined') {
         const { saveImageAsset } = await import('@/lib/assets-storage');
-        saveImageAsset(data.imageUrl, `Background Changed - ${new Date().toLocaleDateString()}`, {
-          model: 'lucataco/remove-bg',
-          prompt: backgroundPrompt,
+        saveImageAsset(data.imageUrl, `Image Studio - ${new Date().toLocaleDateString()}`, {
+          model: 'replicate/image-to-image',
+          prompt: studioPrompt,
         });
       }
       
-      showToast('Background changed successfully!', 'success');
+      showToast('Image Studio result is ready!', 'success');
     } catch (error: any) {
       showToast(error.message || 'Failed to process image', 'error');
     } finally {
@@ -84,12 +97,16 @@ export default function BackgroundChangePage() {
               <ImageIcon className="w-8 h-8 text-[#8b5cf6]" style={{ filter: 'drop-shadow(0 0 8px #8b5cf6)' }} />
               <h1 className="text-4xl font-bold text-white">
                 <span className="bg-gradient-to-r from-[#8b5cf6] via-[#6366f1] to-[#8b5cf6] bg-clip-text text-transparent">
-                  Background Change
+                  Image Studio
                 </span>
               </h1>
             </div>
-            <p className="text-gray-400 text-lg">
-              One face. Multiple worlds. Change backgrounds instantly with Replicate (lucataco/remove-bg).
+            <p className="text-gray-400 text-lg">Turn any photo into a studio-quality image</p>
+            <p className="text-gray-400 text-base max-w-2xl mt-3">
+              Our AI recreates lighting, background, and atmosphere to produce professional, commercial-ready images — not just cutouts.
+            </p>
+            <p className="text-gray-400 text-sm max-w-2xl mt-3">
+              From a single photo, Image Studio recreates a professional environment — lighting, background, and mood — while preserving facial identity.
             </p>
           </div>
 
@@ -98,7 +115,7 @@ export default function BackgroundChangePage() {
             <div className="glass rounded-2xl p-8">
               <div className="flex items-center gap-3 mb-6">
                 <Upload className="w-6 h-6 text-[#00d9ff]" />
-                <h2 className="text-2xl font-semibold text-white">Upload Image</h2>
+                <h2 className="text-2xl font-semibold text-white">Upload Photo</h2>
               </div>
               <input
                 ref={fileInputRef}
@@ -111,10 +128,10 @@ export default function BackgroundChangePage() {
                 onClick={() => fileInputRef.current?.click()}
                 className="interactive-element w-full h-96 border-2 border-dashed border-white/20 rounded-xl flex flex-col items-center justify-center gap-4 hover:border-[#00d9ff]/50 transition-colors"
               >
-                {uploadedImage ? (
+                {uploadedImageUrl ? (
                   <img
-                    src={URL.createObjectURL(uploadedImage)}
-                    alt="Uploaded"
+                    src={uploadedImageUrl}
+                    alt="Uploaded photo"
                     className="w-full h-full object-cover rounded-lg"
                   />
                 ) : (
@@ -131,58 +148,77 @@ export default function BackgroundChangePage() {
               <div>
                 <div className="flex items-center gap-3 mb-6">
                   <Sparkles className="w-6 h-6 text-[#fbbf24]" />
-                  <h2 className="text-2xl font-semibold text-white">Background Details</h2>
+                  <h2 className="text-2xl font-semibold text-white">Studio Direction</h2>
                 </div>
                 <div className="mb-6">
                   <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Describe your desired background
+                    Describe the lighting, mood, and studio environment
                   </label>
                   <textarea
-                    value={backgroundPrompt}
-                    onChange={(e) => setBackgroundPrompt(e.target.value)}
-                    placeholder="e.g., professional studio, space, office, beach..."
+                    value={studioPrompt}
+                    onChange={(e) => setStudioPrompt(e.target.value)}
+                    placeholder="e.g., soft key light, warm cinematic mood, premium product photography"
                     rows={4}
                     className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[#8b5cf6]/50 transition-colors resize-none interactive-element"
                   />
                 </div>
                 <button
-                  onClick={handleBackgroundChange}
+                  onClick={handleImageStudio}
                   disabled={isProcessing || !uploadedImage}
                   className="interactive-element try-now-button-modern w-full px-10 py-4 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold text-lg rounded-xl transition-all duration-300 relative overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isProcessing ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      Processing...
+                      Crafting studio image...
                     </>
                   ) : (
-                    'Change Background'
+                    'Create Studio Image'
                   )}
                 </button>
               </div>
 
-              {resultImage && (
-                <div className="mt-8">
-                  <h3 className="text-xl font-semibold text-white mb-4">Result</h3>
-                  <div className="relative w-full h-64 rounded-lg overflow-hidden border border-white/10">
-                    <img src={resultImage} alt="Background Change Result" className="w-full h-full object-contain" />
+              <div className="mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-semibold text-white">Before / After</h3>
+                  {resultImage && (
+                    <a
+                      href={resultImage}
+                      download="image-studio-result.png"
+                      className="text-sm text-[#00d9ff] hover:underline interactive-element"
+                    >
+                      Download studio image
+                    </a>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-white/10 bg-black/30 p-4">
+                    <p className="text-xs font-semibold text-gray-400 mb-3">BEFORE · Raw photo</p>
+                    <div className="flex h-56 items-center justify-center rounded-md bg-black/40">
+                      {uploadedImageUrl ? (
+                        <img src={uploadedImageUrl} alt="Raw photo" className="w-full h-full object-cover rounded-md" />
+                      ) : (
+                        <p className="text-gray-500 text-sm">Upload a photo to preview</p>
+                      )}
+                    </div>
                   </div>
-                  <a
-                    href={resultImage}
-                    download="background-change-result.png"
-                    className="mt-4 block text-center text-[#00d9ff] hover:underline interactive-element"
-                  >
-                    Download Result
-                  </a>
+                  <div className="rounded-lg border border-[#00d9ff]/30 bg-black/30 p-4">
+                    <p className="text-xs font-semibold text-[#00d9ff] mb-3">AFTER · Studio image</p>
+                    <div className="flex h-56 items-center justify-center rounded-md bg-black/40">
+                      {isProcessing ? (
+                        <div className="text-center">
+                          <Loader2 className="w-8 h-8 animate-spin text-[#00d9ff] mx-auto mb-3" />
+                          <p className="text-[#00d9ff] text-sm">Lighting, mood, realism in progress...</p>
+                        </div>
+                      ) : resultImage ? (
+                        <img src={resultImage} alt="Studio result" className="w-full h-full object-cover rounded-md" />
+                      ) : (
+                        <p className="text-gray-500 text-sm">Studio output appears here</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              )}
-
-              {isProcessing && !resultImage && (
-                <div className="mt-8 text-center">
-                  <Loader2 className="w-12 h-12 animate-spin text-[#8b5cf6] mx-auto mb-4" />
-                  <p className="text-gray-400">Processing background change...</p>
-                </div>
-              )}
+              </div>
             </div>
           </div>
         </div>

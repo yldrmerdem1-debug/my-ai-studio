@@ -3,20 +3,20 @@
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Film, Sparkles, Video, FileText, Folder, Gem, Box, User, Image as ImageIcon, Zap } from 'lucide-react';
+import { Film, Sparkles, Video, FileText, Folder, Gem, Box, Image as ImageIcon } from 'lucide-react';
 
 const navItems = [
   { name: 'Studio', href: '/', icon: Film },
-  { name: 'AI Persona Lab', href: '/persona', icon: Sparkles, isPremium: true },
-  { name: 'Face Identify', href: '/face-identify', icon: User },
-  { name: 'AI Video', href: '/video', icon: Video },
-  { name: 'Background Change', href: '/background-change', icon: ImageIcon },
-  { name: 'Ad Creation', href: '/ad-creation', icon: FileText },
+  { name: 'AI Persona Lab', href: '/persona', icon: Sparkles, isPremium: true, emphasis: 'primary' },
+  { name: 'Image Studio', href: '/background-change', icon: ImageIcon, emphasis: 'secondary' },
+  { name: 'AI Video', href: '/video', icon: Video, emphasis: 'secondary' },
+  { name: 'Ad Creation', href: '/ad-creation', icon: FileText, emphasis: 'utility' },
+  { name: 'My Assets', href: '/my-assets', icon: Folder, emphasis: 'utility' },
+  { name: 'Subscription', href: '#', icon: Gem, isModal: true, emphasis: 'utility' },
+];
+
+const experimentalItems = [
   { name: '3D Character Lab', href: '/3d', icon: Box },
-  { name: 'AI Ad Script', href: '/ad-script', icon: FileText },
-  { name: 'Viral / Entertainment', href: '/viral-entertainment', icon: Zap },
-  { name: 'My Assets', href: '/my-assets', icon: Folder },
-  { name: 'Subscription', href: '#', icon: Gem, isModal: true },
 ];
 
 interface SidebarProps {
@@ -67,18 +67,25 @@ export default function Sidebar({ onSubscriptionClick }: SidebarProps) {
             ? false 
             : (item.href === '/' ? pathname === '/' : pathname?.startsWith(item.href));
 
-          const className = `interactive-element flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm font-medium transition-all relative ${
+          const baseClassName = `interactive-element flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm font-medium transition-all relative ${
             isActive
               ? 'bg-[#00d9ff]/20 text-[#00d9ff] border border-[#00d9ff]/30 backdrop-blur-sm'
               : 'text-gray-300 hover:bg-white/5 hover:text-white backdrop-blur-sm'
           }`;
+
+          const emphasisClassName =
+            item.emphasis === 'primary'
+              ? 'border border-[#fbbf24]/30 shadow-[0_0_20px_rgba(251,191,36,0.2)] animate-pulse'
+              : item.emphasis === 'secondary'
+                ? 'hover:shadow-[0_10px_35px_rgba(0,217,255,0.25)] hover:-translate-y-0.5'
+                : '';
 
           if (item.isModal) {
             return (
               <button
                 key={item.name}
                 onClick={() => onSubscriptionClick?.()}
-                className={className}
+                className={`${baseClassName} ${emphasisClassName}`}
               >
                 <div className="flex items-center justify-center" style={{ color: 'inherit' }}>
                   <IconComponent className="w-5 h-5" />
@@ -97,7 +104,7 @@ export default function Sidebar({ onSubscriptionClick }: SidebarProps) {
             <Link
               key={item.name}
               href={item.href}
-              className={className}
+              className={`${baseClassName} ${emphasisClassName}`}
             >
               <div className="flex items-center justify-center" style={{ color: 'inherit' }}>
                 <IconComponent className="w-5 h-5" />
@@ -111,6 +118,30 @@ export default function Sidebar({ onSubscriptionClick }: SidebarProps) {
             </Link>
           );
         })}
+
+        <div className="mt-8 border-t border-white/5 pt-5">
+          <p className="px-4 text-xs font-semibold uppercase tracking-[0.2em] text-gray-600">
+            Experimental
+          </p>
+          <div className="mt-3 space-y-2">
+            {experimentalItems.map((item) => {
+              const IconComponent = item.icon;
+              const isActive = pathname?.startsWith(item.href);
+              const className = `flex w-full items-center gap-3 rounded-lg px-4 py-2 text-left text-xs font-medium transition-colors ${
+                isActive ? 'text-[#00d9ff]' : 'text-gray-500 hover:text-gray-300'
+              }`;
+
+              return (
+                <Link key={item.name} href={item.href} className={className}>
+                  <div className="flex items-center justify-center" style={{ color: 'inherit' }}>
+                    <IconComponent className="w-4 h-4" />
+                  </div>
+                  <span>{item.name}</span>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
       </nav>
     </aside>
   );

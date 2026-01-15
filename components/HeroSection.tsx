@@ -13,7 +13,6 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
   const router = useRouter();
   const heroRef = useRef<HTMLElement>(null);
   const [scrollProgress, setScrollProgress] = useState(0);
-  const [isMounted, setIsMounted] = useState(false);
   
   // Intro sequence states
   const [introStage, setIntroStage] = useState<'initial' | 'robot-move' | 'headline' | 'subtext-1' | 'subtext-2' | 'cta' | 'complete'>('initial');
@@ -25,11 +24,6 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
   const [subtext1Opacity, setSubtext1Opacity] = useState(0);
   const [subtext2Opacity, setSubtext2Opacity] = useState(0);
   const [ctaOpacity, setCtaOpacity] = useState(0);
-
-  // Client-side only mount - prevents hydration mismatch
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
 
   // Intro sequence animation - Faster, more impactful (within 5 seconds)
   useEffect(() => {
@@ -121,83 +115,36 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
         
         {/* Animated left side gradient - stronger cyan glow with motion */}
         <div 
-          className="absolute left-0 top-0 bottom-0 w-2/5 bg-gradient-to-r from-[#00d9ff]/20 via-[#00d9ff]/12 to-transparent"
+          className="absolute left-0 top-0 bottom-0 w-1/2 bg-gradient-to-r from-[#00d9ff]/25 via-[#00d9ff]/12 to-transparent"
           style={{
             animation: 'gradient-pulse 6s ease-in-out infinite',
+            willChange: 'transform',
           }}
         />
         
         {/* Animated right side gradient - stronger blue glow with motion */}
         <div 
-          className="absolute right-0 top-0 bottom-0 w-2/5 bg-gradient-to-l from-[#0099ff]/20 via-[#0099ff]/12 to-transparent"
+          className="absolute right-0 top-0 bottom-0 w-1/2 bg-gradient-to-l from-[#0099ff]/25 via-[#0099ff]/12 to-transparent"
           style={{
             animation: 'gradient-pulse 8s ease-in-out infinite',
             animationDelay: '2s',
+            willChange: 'transform',
           }}
         />
         
         {/* Center dominant glow - matches robot position */}
-        <div 
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[1200px] h-[1200px] bg-[#00d9ff]/12 rounded-full blur-3xl"
-          style={{ 
-            animation: 'pulse 5s ease-in-out infinite',
-          }}
-        />
-        
-        {/* Additional ambient glows with motion */}
-        <div 
-          className="absolute bottom-1/4 right-1/4 w-[700px] h-[700px] bg-[#0099ff]/10 rounded-full blur-3xl"
-          style={{ 
-            animation: 'pulse 7s ease-in-out infinite',
-            animationDelay: '1s',
-          }}
-        />
-        <div 
-          className="absolute top-1/4 left-1/4 w-[600px] h-[600px] bg-[#00d9ff]/8 rounded-full blur-3xl"
-          style={{ 
-            animation: 'pulse 9s ease-in-out infinite',
-            animationDelay: '3s',
-          }}
-        />
-        
-        {/* Subtle noise texture overlay */}
-        <div 
-          className="absolute inset-0 opacity-[0.03]"
+        <div
+          className="absolute inset-0"
           style={{
-            backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`,
-            mixBlendMode: 'overlay',
+            backgroundImage:
+              'radial-gradient(circle at 50% 50%, rgba(0, 217, 255, 0.16), transparent 55%), radial-gradient(circle at 75% 70%, rgba(0, 153, 255, 0.12), transparent 60%)',
           }}
         />
-        
-        {/* Animated particle-like dots - Client-side only to prevent hydration mismatch */}
-        {isMounted && [...Array(12)].map((_, i) => {
-          const angle = (i * 360) / 12;
-          const distance = 400 + (i % 3) * 100;
-          const angleRad = (angle * Math.PI) / 180;
-          // Round to 2 decimal places to ensure consistent values
-          const leftOffset = Math.round(Math.cos(angleRad) * distance * 100) / 100;
-          const topOffset = Math.round(Math.sin(angleRad) * distance * 100) / 100;
-          
-          return (
-            <div
-              key={i}
-              className="absolute w-1 h-1 bg-[#00d9ff] rounded-full blur-sm"
-              style={{
-                left: `calc(50% + ${leftOffset}px)`,
-                top: `calc(50% + ${topOffset}px)`,
-                transform: 'translate(-50%, -50%)',
-                opacity: 0.4,
-                animation: `particle-float ${4 + (i % 3)}s ease-in-out infinite`,
-                animationDelay: `${i * 0.2}s`,
-              }}
-            />
-          );
-        })}
                 </div>
 
       {/* Spline 3D Scene - Full-scene centerpiece with scale-up + fade-in */}
       <div 
-        className="absolute inset-0 z-10"
+        className="absolute -inset-x-10 inset-y-0 z-10"
         style={{
           transform: `scale(${robotScale}) translateX(${robotTranslateX}px)`,
           opacity: robotOpacity,
@@ -205,6 +152,7 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
             ? 'opacity 0.8s ease-out, transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)' 
             : 'transform 1.2s cubic-bezier(0.4, 0, 0.2, 1)',
           objectFit: 'cover',
+          willChange: 'transform',
         }}
       >
         <SplineScene 
@@ -218,7 +166,8 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
           style={{
             background: 'radial-gradient(circle at center, transparent 30%, rgba(0, 217, 255, 0.1) 70%, transparent 100%)',
             mixBlendMode: 'screen',
-            animation: 'glow-pulse 4s ease-in-out infinite',
+            animation: 'glow-drift 5s ease-in-out infinite',
+            willChange: 'transform',
           }}
         />
       </div>
@@ -273,18 +222,18 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
                 textShadow: '0 2px 40px rgba(0, 0, 0, 0.95), 0 0 20px rgba(255, 255, 255, 0.1), 0 0 40px rgba(0, 217, 255, 0.2)',
               }}
             >
-              Train your AI with just 20 photos.
+              Train once. Create everywhere.
             </p>
             <p
               className="text-lg sm:text-xl lg:text-2xl leading-relaxed"
               style={{
                 opacity: subtext2Opacity,
                 transition: 'opacity 0.8s ease-out',
-                color: '#f0f0f0',
-                textShadow: '0 2px 40px rgba(0, 0, 0, 0.95), 0 0 20px rgba(255, 255, 255, 0.1)',
+                color: '#ffffff',
+                textShadow: '0 2px 40px rgba(0, 0, 0, 0.95), 0 0 20px rgba(255, 255, 255, 0.15)',
               }}
             >
-              Create consistent, professional content everywhere.
+              Upload 20 photos. Generate videos, ads, and images that look like you.
             </p>
               </div>
 
@@ -345,7 +294,7 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
                   textShadow: '0 0 20px rgba(255, 255, 255, 0.5)',
                 }}
               >
-                Start Training Your AI
+                Start Training
                 <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" />
               </span>
             </button>
