@@ -1,17 +1,22 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Image as ImageIcon, Upload, Sparkles, Loader2, Eraser, Camera, User, Wand2 } from 'lucide-react';
 import { useToast } from '@/hooks/useToast';
 import PreviewArea from '@/components/PreviewArea';
+import { usePersona } from '@/hooks/usePersona';
+import { canUsePersona } from '@/lib/subscription';
 
 type ToolMode = 'background-remove' | 'studio-background' | 'face-identity' | null;
 
 export default function StudioPage() {
   const { showToast } = useToast();
+  const { user, persona } = usePersona();
+  const canUsePersonaFeatures = canUsePersona(user);
+  const personaReady = persona?.visualStatus === 'ready';
   const [selectedTool, setSelectedTool] = useState<ToolMode>(null);
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
@@ -24,6 +29,56 @@ export default function StudioPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const targetInputRef = useRef<HTMLInputElement>(null);
+  const [personaMode, setPersonaMode] = useState<'generic' | 'persona'>('generic');
+  const [trainedPersonas, setTrainedPersonas] = useState<string[]>([]);
+  const [selectedPersona, setSelectedPersona] = useState<string>('');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('trainedPersonas');
+      if (saved) {
+        try {
+          setTrainedPersonas(JSON.parse(saved));
+        } catch (e) {
+          console.error('Failed to load personas:', e);
+        }
+      }
+    }
+  }, []);
+
+  const getPersonaTriggerWord = () => {
+    return personaMode === 'persona' ? selectedPersona : '';
+  };
+
+  const getPersonaId = () => {
+    return personaMode === 'persona' ? persona?.id : undefined;
+  };
+
+  const requirePersonaReady = () => {
+    if (!canUsePersonaFeatures) {
+      setIsPricingModalOpen(true);
+      showToast('Premium required for Persona Mode.', 'warning');
+      return false;
+    }
+    if (!personaReady) {
+      showToast('Persona Mode requires a ready visual persona.', 'warning');
+      return false;
+    }
+    if (!persona?.id) {
+      showToast('Persona Mode requires a persona identity.', 'warning');
+      return false;
+    }
+    return true;
+  };
+
+  const fileToDataUrl = async (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+    });
+  };
 
   const tools = [
     {
@@ -72,18 +127,32 @@ export default function StudioPage() {
       showToast('Please upload an image first', 'warning');
       return;
     }
+    if (personaMode === 'persona' && !requirePersonaReady()) {
+      return;
+    }
 
     setIsProcessing(true);
     setResultImage(null);
 
     try {
-      const formData = new FormData();
-      formData.append('image', uploadedImage);
-      formData.append('action', 'remove-background');
+      const imageDataUrl = await fileToDataUrl(uploadedImage);
+      const triggerWord = getPersonaTriggerWord();
+      const personaId = getPersonaId();
 
       const response = await fetch('/api/generate', {
         method: 'POST',
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'remove-background',
+          image: imageDataUrl,
+          triggerWord: triggerWord || undefined,
+          personaId,
+          personaMode,
+          personaStatus: persona?.visualStatus ?? 'none',
+          user,
+        }),
       });
 
       if (!response.ok) {
@@ -117,19 +186,33 @@ export default function StudioPage() {
       showToast('Please upload an image first', 'warning');
       return;
     }
+    if (personaMode === 'persona' && !requirePersonaReady()) {
+      return;
+    }
 
     setIsProcessing(true);
     setResultImage(null);
 
     try {
-      const formData = new FormData();
-      formData.append('image', uploadedImage);
-      formData.append('action', 'studio-background');
-      formData.append('prompt', backgroundPrompt || 'professional studio background, clean white background, high quality photography');
+      const imageDataUrl = await fileToDataUrl(uploadedImage);
+      const triggerWord = getPersonaTriggerWord();
+      const personaId = getPersonaId();
 
       const response = await fetch('/api/generate', {
         method: 'POST',
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'studio-background',
+          image: imageDataUrl,
+          prompt: backgroundPrompt || 'professional studio background, clean white background, high quality photography',
+          triggerWord: triggerWord || undefined,
+          personaId,
+          personaMode,
+          personaStatus: persona?.visualStatus ?? 'none',
+          user,
+        }),
       });
 
       if (!response.ok) {
@@ -247,6 +330,72 @@ export default function StudioPage() {
             <p className="text-gray-400 text-lg">
               Professional image editing tools powered by AI. Remove backgrounds, create studio shots, and swap faces.
             </p>
+          </div>
+
+          <div className="glass rounded-2xl p-6 mb-8">
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h2 className="text-xl font-semibold text-white">Use Persona</h2>
+              <span className="text-xs text-white/50">Requires ready visual persona</span>
+            </div>
+            <div className="flex items-center justify-between gap-4 mb-6">
+              <div>
+                <p className="text-sm text-gray-300">
+                  {personaMode === 'persona'
+                    ? 'Persona mode enabled — consistent identity across generations.'
+                    : 'Generic mode — no persona reference.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPersonaMode(personaMode === 'persona' ? 'generic' : 'persona')}
+                className={`relative inline-flex h-8 w-16 items-center rounded-full transition-colors ${
+                  personaMode === 'persona' ? 'bg-[#00d9ff]' : 'bg-white/10'
+                }`}
+                disabled={isProcessing || !canUsePersonaFeatures || !personaReady}
+                aria-pressed={personaMode === 'persona'}
+              >
+                <span
+                  className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
+                    personaMode === 'persona' ? 'translate-x-9' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+            {!canUsePersonaFeatures && (
+              <p className="text-sm text-yellow-400 mb-4">
+                Premium required to enable Persona Mode.
+              </p>
+            )}
+            {canUsePersonaFeatures && !personaReady && (
+              <p className="text-sm text-yellow-400 mb-4">
+                Persona Mode is disabled until your visual persona is ready.
+              </p>
+            )}
+
+            {personaMode === 'persona' && (
+              <div className="max-w-md">
+                <label className="block text-sm font-medium text-gray-300 mb-2">Trained Persona</label>
+                {trainedPersonas.length > 0 ? (
+                  <select
+                    value={selectedPersona}
+                    onChange={(event) => setSelectedPersona(event.target.value)}
+                    disabled={isProcessing}
+                    className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
+                  >
+                    <option value="">Optional: select a trigger word</option>
+                    {trainedPersonas.map((persona, index) => (
+                      <option key={`${persona}-${index}`} value={persona}>
+                        {persona}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-sm text-yellow-400">
+                    No trained personas found. Train one in the Persona Lab first.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {!selectedTool ? (

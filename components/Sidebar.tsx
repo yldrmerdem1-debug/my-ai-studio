@@ -3,13 +3,14 @@
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { Film, Sparkles, Video, FileText, Folder, Gem, Box, Image as ImageIcon } from 'lucide-react';
+import { Film, Sparkles, Video, FileText, Folder, Gem, Box, Image as ImageIcon, Volume2 } from 'lucide-react';
 
 const navItems = [
   { name: 'Studio', href: '/', icon: Film },
   { name: 'AI Persona Lab', href: '/persona', icon: Sparkles, isPremium: true, emphasis: 'primary' },
   { name: 'Image Studio', href: '/background-change', icon: ImageIcon, emphasis: 'secondary' },
   { name: 'AI Video', href: '/video', icon: Video, emphasis: 'secondary' },
+  { name: 'Ad Script', href: '/ad-script', icon: Volume2, emphasis: 'secondary' },
   { name: 'Ad Creation', href: '/ad-creation', icon: FileText, emphasis: 'utility' },
   { name: 'My Assets', href: '/my-assets', icon: Folder, emphasis: 'utility' },
   { name: 'Subscription', href: '#', icon: Gem, isModal: true, emphasis: 'utility' },

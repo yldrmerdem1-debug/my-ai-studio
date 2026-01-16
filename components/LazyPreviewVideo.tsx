@@ -10,7 +10,8 @@ interface LazyPreviewVideoProps {
   containerClassName?: string;
 }
 
-const DEFAULT_POSTER = '/images/video-preview-poster.svg';
+const DEFAULT_POSTER = '/images/video-studio-poster.jpg';
+const ENABLE_GENERATION = false;
 
 export default function LazyPreviewVideo({
   srcMp4,
@@ -25,6 +26,7 @@ export default function LazyPreviewVideo({
   const [shouldLoad, setShouldLoad] = useState(false);
 
   useEffect(() => {
+    if (!ENABLE_GENERATION) return;
     const node = containerRef.current;
     if (!node) return;
 
@@ -47,6 +49,7 @@ export default function LazyPreviewVideo({
   }, []);
 
   useEffect(() => {
+    if (!ENABLE_GENERATION) return;
     const video = videoRef.current;
     if (!video) return;
 
@@ -76,19 +79,32 @@ export default function LazyPreviewVideo({
       className={`relative h-full w-full overflow-hidden ${containerClassName}`}
       style={{ willChange: 'transform', transform: 'translateZ(0)' }}
     >
-      <video
-        ref={videoRef}
-        className={videoClassName}
-        muted
-        loop
-        playsInline
-        preload="none"
-        poster={poster}
-        style={{ willChange: 'transform', transform: 'translateZ(0)' }}
-      >
-        {shouldLoad && srcWebm && <source src={srcWebm} type="video/webm" />}
-        {shouldLoad && <source src={srcMp4} type="video/mp4" />}
-      </video>
+      {!ENABLE_GENERATION ? (
+        <img
+          src={poster}
+          alt="Video preview"
+          className={videoClassName}
+          loading="eager"
+          decoding="async"
+          onError={(e) => {
+            e.currentTarget.src = DEFAULT_POSTER;
+          }}
+        />
+      ) : (
+        <video
+          ref={videoRef}
+          className={videoClassName}
+          muted
+          loop
+          playsInline
+          preload="none"
+          poster={poster}
+          style={{ willChange: 'transform', transform: 'translateZ(0)' }}
+        >
+          {shouldLoad && srcWebm && <source src={srcWebm} type="video/webm" />}
+          {shouldLoad && <source src={srcMp4} type="video/mp4" />}
+        </video>
+      )}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/40 via-black/10 to-transparent" />
     </div>
   );

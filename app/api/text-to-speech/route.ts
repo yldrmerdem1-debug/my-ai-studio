@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,7 +18,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { text, voiceId = '21m00Tcm4TlvDq8ikWAM' } = await request.json();
+    const { text, voiceId, format = 'mp3', useTrainedVoice, personaId, user } = await request.json();
 
     if (!text || !text.trim()) {
       return NextResponse.json(
@@ -26,13 +27,36 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('Converting text to speech with ElevenLabs...');
+    const premiumCheck = requirePremium(user);
+    if (!premiumCheck.ok) {
+      return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
+    }
+
+    if (useTrainedVoice) {
+      const personaCheck = await requirePersonaAccess({
+        user,
+        personaId,
+        requireReady: 'voice',
+      });
+      if (!personaCheck.ok) {
+        return NextResponse.json(personaCheck.body, { status: personaCheck.status });
+      }
+    }
+
+    console.log('Converting text to speech with ElevenLabs...', {
+      format,
+      useTrainedVoice,
+      personaId,
+    });
+
+    const resolvedVoiceId = voiceId || '21m00Tcm4TlvDq8ikWAM';
+    const acceptHeader = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
 
     // Call ElevenLabs API
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${resolvedVoiceId}`, {
       method: 'POST',
       headers: {
-        'Accept': 'audio/mpeg',
+        'Accept': acceptHeader,
         'Content-Type': 'application/json',
         'xi-api-key': apiKey.trim(),
       },
@@ -58,12 +82,14 @@ export async function POST(request: NextRequest) {
     // Convert blob to base64 for client-side use
     const arrayBuffer = await audioBlob.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString('base64');
-    const audioUrl = `data:audio/mpeg;base64,${base64}`;
+    const audioMime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+    const audioUrl = `data:${audioMime};base64,${base64}`;
 
     console.log('Text-to-speech conversion successful');
 
     return NextResponse.json({
       audioUrl,
+      format: format === 'wav' ? 'wav' : 'mp3',
       status: 'succeeded',
     });
 

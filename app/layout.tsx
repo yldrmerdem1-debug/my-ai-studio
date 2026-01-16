@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Template from "./template";
 import { ToastProvider } from "@/hooks/useToast";
+import { PersonaProvider } from "@/hooks/usePersona";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,7 +31,9 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black text-white`}
       >
         <ToastProvider>
-          <Template>{children}</Template>
+          <PersonaProvider>
+            <Template>{children}</Template>
+          </PersonaProvider>
         </ToastProvider>
       </body>
     </html>

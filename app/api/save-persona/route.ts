@@ -1,78 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs/promises';
-import path from 'path';
-
-// Simple file-based database for personas
-// In production, replace with a real database (PostgreSQL, MongoDB, etc.)
-const PERSONAS_DB_PATH = path.join(process.cwd(), 'data', 'personas.json');
-
-interface PersonaData {
-  triggerWord: string;
-  modelId: string;
-  trainingId: string;
-  createdAt: string;
-  imageCount: number;
-}
-
-async function ensureDataDir() {
-  const dataDir = path.join(process.cwd(), 'data');
-  try {
-    await fs.access(dataDir);
-  } catch {
-    await fs.mkdir(dataDir, { recursive: true });
-  }
-}
-
-async function readPersonas(): Promise<PersonaData[]> {
-  try {
-    await ensureDataDir();
-    const data = await fs.readFile(PERSONAS_DB_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch (error: any) {
-    if (error.code === 'ENOENT') {
-      return [];
-    }
-    throw error;
-  }
-}
-
-async function writePersonas(personas: PersonaData[]) {
-  await ensureDataDir();
-  await fs.writeFile(PERSONAS_DB_PATH, JSON.stringify(personas, null, 2));
-}
+import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
+import { upsertPersona, type PersonaRecord } from '@/lib/persona-registry';
 
 export async function POST(request: NextRequest) {
   try {
-    const personaData: PersonaData = await request.json();
+    const body = await request.json();
+    const personaData = body.persona ?? body;
+    const user = body.user;
 
-    if (!personaData.triggerWord || !personaData.modelId) {
+    const userCheck = requireUserId(user);
+    if (!userCheck.ok) {
+      return NextResponse.json(userCheck.body, { status: userCheck.status });
+    }
+
+    const premiumCheck = requireVisualTrainingAccess(user);
+    if (!premiumCheck.ok) {
+      return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
+    }
+
+    if (!personaData.personaId) {
       return NextResponse.json(
-        { error: 'Trigger word and model ID are required' },
+        { error: 'Persona id is required', code: 'PERSONA_ID_REQUIRED' },
         { status: 400 }
       );
     }
 
-    const personas = await readPersonas();
-    
-    // Check if persona already exists
-    const existingIndex = personas.findIndex(
-      p => p.triggerWord === personaData.triggerWord
-    );
-
-    if (existingIndex >= 0) {
-      // Update existing persona
-      personas[existingIndex] = personaData;
-    } else {
-      // Add new persona
-      personas.push(personaData);
+    const ownershipCheck = await requirePersonaAccess({ user, personaId: personaData.personaId });
+    if (!ownershipCheck.ok && ownershipCheck.body.code !== 'PERSONA_NOT_FOUND') {
+      return NextResponse.json(ownershipCheck.body, { status: ownershipCheck.status });
     }
 
-    await writePersonas(personas);
+    if (!personaData.triggerWord || !personaData.modelId) {
+      return NextResponse.json(
+        { error: 'Trigger word and model ID are required', code: 'PERSONA_DATA_REQUIRED' },
+        { status: 400 }
+      );
+    }
+
+    const record: PersonaRecord = {
+      personaId: personaData.personaId,
+      userId: userCheck.userId,
+      triggerWord: personaData.triggerWord,
+      modelId: personaData.modelId,
+      trainingId: personaData.trainingId,
+      createdAt: personaData.createdAt,
+      imageCount: personaData.imageCount,
+      visualStatus: 'ready',
+    };
+
+    await upsertPersona(record);
 
     return NextResponse.json({
       success: true,
       message: 'Persona saved successfully',
-      persona: personaData,
+      persona: record,
     });
 
   } catch (error: any) {
@@ -86,6 +67,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
+    const { readPersonas } = await import('@/lib/persona-registry');
     const personas = await readPersonas();
     return NextResponse.json({ personas });
   } catch (error: any) {

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
+import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
+import { upsertPersona } from '@/lib/persona-registry';
 
 export async function POST(request: NextRequest) {
   try {
@@ -31,7 +33,29 @@ export async function POST(request: NextRequest) {
       auth: apiToken.trim(),
     });
 
-    const { zipFile, triggerWord, imageCount } = await request.json();
+    const { zipFile, triggerWord, imageCount, user, personaId } = await request.json();
+
+    const userCheck = requireUserId(user);
+    if (!userCheck.ok) {
+      return NextResponse.json(userCheck.body, { status: userCheck.status });
+    }
+
+    const premiumCheck = requireVisualTrainingAccess(user);
+    if (!premiumCheck.ok) {
+      return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
+    }
+
+    if (!personaId) {
+      return NextResponse.json(
+        { error: 'Persona id is required', code: 'PERSONA_ID_REQUIRED' },
+        { status: 400 }
+      );
+    }
+
+    const ownershipCheck = await requirePersonaAccess({ user, personaId });
+    if (!ownershipCheck.ok && ownershipCheck.body.code !== 'PERSONA_NOT_FOUND') {
+      return NextResponse.json(ownershipCheck.body, { status: ownershipCheck.status });
+    }
 
     if (!zipFile) {
       return NextResponse.json(
@@ -40,26 +64,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!imageCount || imageCount < 10) {
+    if (!imageCount || imageCount < 20) {
       return NextResponse.json(
-        { error: 'At least 10 images are required' },
+        { error: 'Exactly 20 images are required', code: 'IMAGE_COUNT_INVALID' },
         { status: 400 }
       );
     }
 
     if (imageCount > 20) {
       return NextResponse.json(
-        { error: 'Maximum 20 images allowed' },
+        { error: 'Exactly 20 images are required', code: 'IMAGE_COUNT_INVALID' },
         { status: 400 }
       );
     }
 
     if (!triggerWord) {
       return NextResponse.json(
-        { error: 'Trigger word is required' },
+        { error: 'Trigger word is required', code: 'TRIGGER_REQUIRED' },
         { status: 400 }
       );
     }
+
+    await upsertPersona({
+      personaId,
+      userId: userCheck.userId,
+      triggerWord,
+      imageCount,
+      visualStatus: 'training',
+      createdAt: new Date().toISOString(),
+    });
 
     console.log(`Starting training with ${imageCount} images, trigger word: ${triggerWord}`);
 

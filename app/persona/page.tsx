@@ -5,7 +5,9 @@ import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import JSZip from 'jszip';
-import { Sparkles, Camera, Target } from 'lucide-react';
+import { Sparkles, Camera, Target, Mic, Lock } from 'lucide-react';
+import { usePersona } from '@/hooks/usePersona';
+import { canTrainVisualPersona, canTrainVoicePersona } from '@/lib/subscription';
 
 export default function PersonaPage() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
@@ -19,8 +21,47 @@ export default function PersonaPage() {
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const voiceInputRef = useRef<HTMLInputElement>(null);
+  const { user, persona, requestVisualPersona, requestVoicePersona, setVisualStatus, setVoiceStatus } = usePersona();
+  const canTrainVisual = canTrainVisualPersona(user);
+  const canTrainVoice = canTrainVoicePersona(user);
+  const visualStatus = persona?.visualStatus ?? 'none';
+  const voiceStatus = persona?.voiceStatus ?? 'none';
+  const [voiceFiles, setVoiceFiles] = useState<File[]>([]);
+  const [voiceDurationSec, setVoiceDurationSec] = useState<number>(0);
+  const [isVoiceTraining, setIsVoiceTraining] = useState(false);
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const calculateTotalDuration = async (files: File[]): Promise<number> => {
+    const durations = await Promise.all(files.map(file => {
+      return new Promise<number>((resolve) => {
+        const audio = new Audio();
+        audio.src = URL.createObjectURL(file);
+        audio.addEventListener('loadedmetadata', () => {
+          const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+          URL.revokeObjectURL(audio.src);
+          resolve(duration);
+        });
+        audio.addEventListener('error', () => {
+          URL.revokeObjectURL(audio.src);
+          resolve(0);
+        });
+      });
+    }));
+    return durations.reduce((sum, duration) => sum + duration, 0);
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canTrainVisual) {
+      setIsPricingModalOpen(true);
+      alert('Premium plan required to upload photos for persona training.');
+      return;
+    }
     const files = Array.from(e.target.files || []);
     const imageFiles = files.filter(file => file.type.startsWith('image/'));
     
@@ -33,6 +74,11 @@ export default function PersonaPage() {
   };
 
   const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canTrainVisual) {
+      setIsPricingModalOpen(true);
+      alert('Premium plan required to upload photos for persona training.');
+      return;
+    }
     const file = e.target.files?.[0];
     if (!file || !file.name.endsWith('.zip')) {
       alert('Please upload a ZIP file');
@@ -61,8 +107,8 @@ export default function PersonaPage() {
         }
       }
 
-      if (imageFiles.length < 10) {
-        alert(`ZIP file contains only ${imageFiles.length} images. At least 10 images are required.`);
+      if (imageFiles.length < 20) {
+        alert(`ZIP file contains only ${imageFiles.length} images. Exactly 20 images are required.`);
         return;
       }
 
@@ -72,6 +118,23 @@ export default function PersonaPage() {
       console.error('ZIP extraction error:', error);
       alert('Failed to extract images from ZIP file. Please try again.');
     }
+  };
+
+  const handleVoiceSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canTrainVoice) {
+      setIsPricingModalOpen(true);
+      alert('Premium plan required to upload voice samples.');
+      return;
+    }
+    const files = Array.from(e.target.files || []);
+    const audioFiles = files.filter(file => file.type.startsWith('audio/'));
+    if (audioFiles.length === 0) {
+      alert('Please upload audio files for voice samples.');
+      return;
+    }
+    setVoiceFiles(audioFiles);
+    const totalDuration = await calculateTotalDuration(audioFiles);
+    setVoiceDurationSec(totalDuration);
   };
 
   const removeFile = (index: number) => {
@@ -123,8 +186,14 @@ export default function PersonaPage() {
   };
 
   const startTraining = async () => {
-    if (uploadedFiles.length < 10) {
-      alert('Please upload at least 10 images to train your AI persona');
+    if (!canTrainVisual) {
+      setIsPricingModalOpen(true);
+      alert('Premium plan required to create or train personas.');
+      return;
+    }
+
+    if (uploadedFiles.length < 20) {
+      alert('Please upload exactly 20 images to train your AI persona');
       return;
     }
 
@@ -133,11 +202,23 @@ export default function PersonaPage() {
       return;
     }
 
+    const personaRequest = requestVisualPersona(uploadedFiles.length);
+    if (!personaRequest.ok) {
+      if (personaRequest.reason === 'premium_required') {
+        setIsPricingModalOpen(true);
+        alert('Premium plan required to create or train personas.');
+      } else if (personaRequest.reason === 'requires_20_photos') {
+        alert('Please upload exactly 20 images to train your AI persona');
+      }
+      return;
+    }
+
     setIsTraining(true);
     setTrainingProgress(0);
     setTrainingStatus('Preparing training data...');
     const newTriggerWord = generateTriggerWord();
     setTriggerWord(newTriggerWord);
+    const personaId = personaRequest.personaId ?? persona?.id;
 
     try {
       setTrainingStatus(`Creating ZIP file from ${uploadedFiles.length} images...`);
@@ -179,6 +260,8 @@ export default function PersonaPage() {
           zipFile: zipBase64,
           triggerWord: newTriggerWord,
           imageCount: uploadedFiles.length,
+          user,
+          personaId,
         }),
       });
 
@@ -204,6 +287,48 @@ export default function PersonaPage() {
     }
   };
 
+  const startVoiceTraining = async () => {
+    if (!canTrainVoice) {
+      setIsPricingModalOpen(true);
+      alert('Premium plan required to train voice personas.');
+      return;
+    }
+    if (voiceDurationSec < 120 || voiceDurationSec > 300) {
+      alert('Please upload 2–5 minutes of voice samples total.');
+      return;
+    }
+    const voiceRequest = requestVoicePersona(voiceDurationSec);
+    if (!voiceRequest.ok) {
+      if (voiceRequest.reason === 'premium_required') {
+        setIsPricingModalOpen(true);
+        alert('Premium plan required to train voice personas.');
+      } else if (voiceRequest.reason === 'requires_voice_samples') {
+        alert('Please upload 2–5 minutes of voice samples total.');
+      }
+      return;
+    }
+    setIsVoiceTraining(true);
+    setVoiceStatus('training');
+    setTimeout(() => {
+      setIsVoiceTraining(false);
+      setVoiceStatus('ready');
+      const personaId = voiceRequest.personaId ?? persona?.id;
+      if (personaId) {
+        fetch('/api/save-voice-persona', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            personaId,
+            user,
+            voiceStatus: 'ready',
+          }),
+        }).catch((error) => {
+          console.error('Failed to save voice persona status:', error);
+        });
+      }
+    }, 3000);
+  };
+
   const pollTrainingStatus = async (id: string) => {
     const maxAttempts = 120; // 10 minutes max (5 second intervals)
     let attempts = 0;
@@ -217,6 +342,7 @@ export default function PersonaPage() {
           setTrainingProgress(100);
           setTrainingStatus('Training complete! Your AI persona is ready.');
           setIsTraining(false);
+          setVisualStatus('ready');
           
           // Get model ID from status response
           const modelId = data.modelId || data.output || null;
@@ -226,6 +352,7 @@ export default function PersonaPage() {
           // Save persona data to database (localStorage for now, can be replaced with API)
           if (typeof window !== 'undefined' && triggerWord) {
             const personaData = {
+              personaId: persona?.id,
               triggerWord: triggerWord,
               modelId: modelId, // Model ID from training output
               trainingId: id, // Use the polling ID
@@ -262,7 +389,7 @@ export default function PersonaPage() {
                 const saveResponse = await fetch('/api/save-persona', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(personaData),
+                  body: JSON.stringify({ persona: personaData, user }),
                 });
                 
                 if (saveResponse.ok) {
@@ -303,6 +430,7 @@ export default function PersonaPage() {
         console.error('Polling error:', error);
         setTrainingStatus(`Error: ${error.message}`);
         setIsTraining(false);
+        setVisualStatus('none');
       }
     };
 
@@ -332,96 +460,201 @@ export default function PersonaPage() {
               </span>
             </div>
             <p className="text-gray-400 text-lg">
-              Train your custom AI model. Upload 10-20 high-quality images to create your digital twin. Use your unique trigger word to generate consistent personas in all your creations.
+              Train your custom AI model. Upload exactly 20 high-quality images to create your digital twin. Use your unique trigger word to generate consistent personas in all your creations.
             </p>
           </div>
 
-          {/* Upload Section */}
+          {/* Visual Persona Training */}
           <div className="glass rounded-2xl p-8 mb-8">
-            <h2 className="text-2xl font-semibold text-white mb-4">Upload Training Images</h2>
-            <p className="text-gray-400 mb-2">
-              Upload 10-20 high-quality images of yourself or the subject you want to train. 
-              Use clear, well-lit photos from different angles for best results.
-            </p>
-            <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
-              <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
-            </p>
-
-            {/* File Upload Buttons */}
-            <div className="flex gap-4 mb-6">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={handleFileSelect}
-                className="hidden"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isTraining}
-                className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Camera className="w-4 h-4" /> Upload Images (Multiple)
-              </button>
-
-              <input
-                ref={zipInputRef}
-                type="file"
-                accept=".zip"
-                onChange={handleZipUpload}
-                className="hidden"
-              />
-              <button
-                onClick={() => zipInputRef.current?.click()}
-                disabled={isTraining}
-                className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                📦 Upload ZIP File
-              </button>
+            <div className="flex items-start justify-between gap-4 mb-6">
+              <div>
+                <h2 className="text-2xl font-semibold text-white mb-2">Visual Persona Training</h2>
+                <p className="text-gray-400">
+                  Upload exactly 20 high-quality images of yourself or the subject you want to train.
+                  Use clear, well-lit photos from different angles for best results.
+                </p>
+              </div>
+              <span className="px-3 py-1 text-xs font-semibold rounded-full bg-white/10 text-white">
+                Status: {visualStatus}
+              </span>
             </div>
 
-            {/* Uploaded Files List */}
-            {uploadedFiles.length > 0 && (
-              <div className="mb-6">
-                <p className="text-sm text-gray-400 mb-3">
-                  {uploadedFiles.length} / 20 images uploaded
-                </p>
-                <div className="grid grid-cols-5 gap-4">
-                  {uploadedFiles.map((file, index) => (
-                    <div key={index} className="relative group">
-                      <img
-                        src={URL.createObjectURL(file)}
-                        alt={`Upload ${index + 1}`}
-                        className="w-full h-32 object-cover rounded-lg"
-                      />
-                      {!isTraining && (
-                        <button
-                          onClick={() => removeFile(index)}
-                          className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
-                  ))}
+            {!canTrainVisual ? (
+              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center">
+                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
+                  <Lock className="w-4 h-4" />
+                  <span>Premium required for visual persona training.</span>
                 </div>
+                <button
+                  onClick={() => setIsPricingModalOpen(true)}
+                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
+                >
+                  Upgrade to Premium
+                </button>
               </div>
+            ) : (
+              <>
+                <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
+                </p>
+
+                {/* File Upload Buttons */}
+                <div className="flex gap-4 mb-6">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isTraining || !canTrainVisual}
+                    className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    <Camera className="w-4 h-4" /> Upload Images (Multiple)
+                  </button>
+
+                  <input
+                    ref={zipInputRef}
+                    type="file"
+                    accept=".zip"
+                    onChange={handleZipUpload}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => zipInputRef.current?.click()}
+                    disabled={isTraining || !canTrainVisual}
+                    className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    📦 Upload ZIP File
+                  </button>
+                </div>
+
+                {/* Uploaded Files List */}
+                {uploadedFiles.length > 0 && (
+                  <div className="mb-6">
+                    <p className="text-sm text-gray-400 mb-3">
+                      {uploadedFiles.length} / 20 images uploaded
+                    </p>
+                    <div className="grid grid-cols-5 gap-4">
+                      {uploadedFiles.map((file, index) => (
+                        <div key={index} className="relative group">
+                          <img
+                            src={URL.createObjectURL(file)}
+                            alt={`Upload ${index + 1}`}
+                            className="w-full h-32 object-cover rounded-lg"
+                          />
+                          {!isTraining && (
+                            <button
+                              onClick={() => removeFile(index)}
+                              className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Training Button */}
+                <button
+                  onClick={startTraining}
+                  disabled={isTraining || uploadedFiles.length < 20 || !canTrainVisual}
+                  className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isTraining ? 'Training in Progress...' : '🚀 Train My AI Persona'}
+                </button>
+
+                {uploadedFiles.length < 20 && uploadedFiles.length > 0 && (
+                  <p className="mt-4 text-sm text-yellow-400 text-center">
+                    Upload {20 - uploadedFiles.length} more image(s) to reach 20
+                  </p>
+                )}
+              </>
             )}
+          </div>
 
-            {/* Training Button */}
-            <button
-              onClick={startTraining}
-              disabled={isTraining || uploadedFiles.length < 10}
-              className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isTraining ? 'Training in Progress...' : '🚀 Train My AI Persona'}
-            </button>
+          {/* Voice Persona Training */}
+          <div className="glass rounded-2xl p-8 mb-8">
+            <div className="flex items-start justify-between gap-4 mb-6">
+              <div>
+                <h2 className="text-2xl font-semibold text-white mb-2">Voice Persona Training</h2>
+                <p className="text-gray-400">
+                  Upload voice samples totaling 2–5 minutes. Clear audio with varied tones works best.
+                </p>
+              </div>
+              <span className="px-3 py-1 text-xs font-semibold rounded-full bg-white/10 text-white">
+                Status: {voiceStatus}
+              </span>
+            </div>
 
-            {uploadedFiles.length < 10 && uploadedFiles.length > 0 && (
-              <p className="mt-4 text-sm text-yellow-400 text-center">
-                Upload at least {10 - uploadedFiles.length} more image(s) to start training
-              </p>
+            {!canTrainVoice ? (
+              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center">
+                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
+                  <Lock className="w-4 h-4" />
+                  <span>Premium required for voice persona training.</span>
+                </div>
+                <button
+                  onClick={() => setIsPricingModalOpen(true)}
+                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
+                >
+                  Upgrade to Premium
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-4 mb-6">
+                  <input
+                    ref={voiceInputRef}
+                    type="file"
+                    accept="audio/*"
+                    multiple
+                    onChange={handleVoiceSelect}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => voiceInputRef.current?.click()}
+                    disabled={isVoiceTraining || !canTrainVoice}
+                    className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    <Mic className="w-4 h-4" /> Upload Voice Samples
+                  </button>
+                  {voiceFiles.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setVoiceFiles([]);
+                        setVoiceDurationSec(0);
+                      }}
+                      className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-white/5 border border-white/10 transition-all"
+                    >
+                      Clear Samples
+                    </button>
+                  )}
+                </div>
+
+                {voiceFiles.length > 0 && (
+                  <div className="mb-4 text-sm text-gray-300">
+                    Total duration: <span className="text-white font-semibold">{formatDuration(voiceDurationSec)}</span>
+                  </div>
+                )}
+                {voiceDurationSec > 0 && (voiceDurationSec < 120 || voiceDurationSec > 300) && (
+                  <p className="text-sm text-yellow-400 mb-4">
+                    Voice samples must total between 2–5 minutes.
+                  </p>
+                )}
+
+                <button
+                  onClick={startVoiceTraining}
+                  disabled={isVoiceTraining || voiceDurationSec < 120 || voiceDurationSec > 300 || !canTrainVoice}
+                  className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isVoiceTraining ? 'Training in Progress...' : '🎙️ Train My Voice Persona'}
+                </button>
+              </>
             )}
           </div>
 
@@ -612,7 +845,7 @@ export default function PersonaPage() {
                   <span className="text-2xl">1️⃣</span>
                   <div>
                     <h3 className="text-white font-medium mb-1">Upload Images</h3>
-                    <p>Upload 10-20 high-quality images. More variety = better results.</p>
+                    <p>Upload exactly 20 high-quality images. More variety = better results.</p>
                   </div>
                 </div>
                 <div className="flex gap-4">

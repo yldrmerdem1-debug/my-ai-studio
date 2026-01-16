@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
 import { translate } from '@vitalets/google-translate-api';
 import sharp from 'sharp';
+import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
 
 // Map action types to Replicate models
 // Updated to use the specific models requested by the user
@@ -111,7 +112,24 @@ export async function POST(request: NextRequest) {
       auth: apiToken.trim(),
     });
 
-    const { action, image, prompt, triggerWord } = await request.json();
+    const { action, image, prompt, triggerWord, user, personaMode, personaId } = await request.json();
+
+    const wantsPersona = personaMode === 'persona' || !!triggerWord;
+    if (wantsPersona) {
+      const premiumCheck = requirePremium(user);
+      if (!premiumCheck.ok) {
+        return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
+      }
+
+      const personaCheck = await requirePersonaAccess({
+        user,
+        personaId,
+        requireReady: 'visual',
+      });
+      if (!personaCheck.ok) {
+        return NextResponse.json(personaCheck.body, { status: personaCheck.status });
+      }
+    }
 
     if (!action) {
       return NextResponse.json(

@@ -4,7 +4,9 @@ import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
-import { Video, Camera, Lightbulb, Film, User, Music, Building2 } from 'lucide-react';
+import { Video, Camera, Lightbulb, Film, User, Music, Building2, Lock } from 'lucide-react';
+import { usePersona } from '@/hooks/usePersona';
+import { canUsePersona } from '@/lib/subscription';
 
 interface ImageSequence {
   id: string;
@@ -23,7 +25,6 @@ interface ChatMessage {
 
 export default function VideoPage() {
   const [selectedPersona, setSelectedPersona] = useState<string>('');
-  const [customTriggerWord, setCustomTriggerWord] = useState<string>('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -32,13 +33,16 @@ export default function VideoPage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoId, setVideoId] = useState<string>('');
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
-  const [useCustomTrigger, setUseCustomTrigger] = useState(false);
   const [imageSequence, setImageSequence] = useState<ImageSequence[]>([]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [generationMode, setGenerationMode] = useState<'images' | 'text-only'>('images');
   const imageInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const { user, persona } = usePersona();
+  const canUsePersonaFeatures = canUsePersona(user);
+  const personaReady = persona?.visualStatus === 'ready';
+  const [personaMode, setPersonaMode] = useState<'generic' | 'persona'>('generic');
 
   // In a real app, this would come from a database/API
   // For now, we'll use localStorage or allow manual entry
@@ -110,8 +114,24 @@ export default function VideoPage() {
   };
 
   const generateVideoFromChat = async (userPrompt: string) => {
-    const triggerWord = useCustomTrigger ? customTriggerWord : selectedPersona;
+    const triggerWord = personaMode === 'persona' ? selectedPersona : '';
     const isTextOnlyMode = generationMode === 'text-only' || imageSequence.length === 0;
+
+    if (personaMode === 'persona') {
+      if (!canUsePersonaFeatures) {
+        setIsPricingModalOpen(true);
+        alert('Premium plan required to use Persona Mode.');
+        return;
+      }
+      if (!personaReady) {
+        alert('Persona Mode requires a ready visual persona.');
+        return;
+      }
+      if (!persona?.id) {
+        alert('Persona Mode requires a persona identity.');
+        return;
+      }
+    }
     
     setIsGenerating(true);
     setGenerationProgress(0);
@@ -158,8 +178,12 @@ export default function VideoPage() {
       const requestBody: any = {
         prompt: fullPrompt,
         triggerWord: triggerWord || undefined,
+        personaMode,
+        personaStatus: persona?.visualStatus ?? 'none',
+        personaId: persona?.id,
         isTextOnly: isTextOnlyMode,
         mode: isTextOnlyMode ? 'text-to-video' : 'image-to-video',
+        user,
       };
 
       // Add images if we have them
@@ -497,78 +521,91 @@ export default function VideoPage() {
             </p>
           </div>
 
-          {/* Persona Selection - Moved above chat */}
+          {/* Persona Mode */}
           <div className="glass rounded-2xl p-6 mb-8">
-            <h2 className="text-xl font-semibold text-white mb-4">AI Persona Selection (Optional)</h2>
-            
-            <div className="mb-6">
-              <label className="flex items-center gap-3 mb-4">
-                <input
-                  type="radio"
-                  checked={!useCustomTrigger}
-                  onChange={() => setUseCustomTrigger(false)}
-                  className="w-4 h-4 text-[#00d9ff]"
-                />
-                <span className="text-white">Use Trained Persona</span>
-              </label>
-              
-              {!useCustomTrigger && (
-                <div className="ml-7 mb-4">
-                  {trainedPersonas.length > 0 ? (
-                    <select
-                      value={selectedPersona}
-                      onChange={(e) => setSelectedPersona(e.target.value)}
-                      disabled={isGenerating}
-                      className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
-                    >
-                      <option value="">No persona (optional)</option>
-                      {trainedPersonas.map((persona, index) => (
-                        <option key={index} value={persona}>
-                          {persona}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-                      <p className="text-yellow-400 text-sm">
-                        No trained personas found. Persona is optional - you can generate videos without one.
-                        {' '}
-                        <Link href="/persona" className="underline ml-1">
-                          Train your first persona
-                        </Link>
-                        {' '}for consistent character results.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <label className="flex items-center gap-3">
-                <input
-                  type="radio"
-                  checked={useCustomTrigger}
-                  onChange={() => setUseCustomTrigger(true)}
-                  className="w-4 h-4 text-[#00d9ff]"
-                />
-                <span className="text-white">Use Custom Trigger Word</span>
-              </label>
-              
-              {useCustomTrigger && (
-                <div className="ml-7 mt-4">
-                  <input
-                    type="text"
-                    value={customTriggerWord}
-                    onChange={(e) => setCustomTriggerWord(e.target.value)}
-                    placeholder="Enter your trigger word (e.g., coolhero123)"
-                    disabled={isGenerating}
-                    className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none placeholder-gray-500"
-                  />
-                  <p className="text-xs text-gray-400 mt-2">
-                    Enter the trigger word from your trained persona (optional)
-                  </p>
-                </div>
-              )}
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h2 className="text-xl font-semibold text-white">Use Persona</h2>
+              <span className="text-xs text-white/50">Requires ready visual persona</span>
             </div>
+            <div className="flex items-center justify-between gap-4 mb-6">
+              <p className="text-sm text-gray-300">
+                {personaMode === 'persona'
+                  ? 'Persona mode enabled — consistent identity across frames.'
+                  : 'Generic mode — no persona reference.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (personaMode === 'persona') {
+                    setPersonaMode('generic');
+                    setSelectedPersona('');
+                  } else {
+                    setPersonaMode('persona');
+                  }
+                }}
+                className={`relative inline-flex h-8 w-16 items-center rounded-full transition-colors ${
+                  personaMode === 'persona' ? 'bg-[#00d9ff]' : 'bg-white/10'
+                }`}
+                disabled={isGenerating || !canUsePersonaFeatures || !personaReady}
+                title={
+                  !canUsePersonaFeatures
+                    ? 'Premium required to use Persona Mode.'
+                    : !personaReady
+                      ? 'Persona Mode requires a ready visual persona.'
+                      : ''
+                }
+                aria-pressed={personaMode === 'persona'}
+              >
+                <span
+                  className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
+                    personaMode === 'persona' ? 'translate-x-9' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+            {!canUsePersonaFeatures && (
+              <p className="text-sm text-yellow-400 mb-4 flex items-center gap-2">
+                <Lock className="w-4 h-4" />
+                Premium required to use Persona Mode.
+              </p>
+            )}
+            {canUsePersonaFeatures && !personaReady && (
+              <p className="text-sm text-yellow-400 mb-4">
+                Persona Mode is disabled until your visual persona is ready.
+              </p>
+            )}
+
+            {/* Persona Selection - Only in Persona Mode */}
+            {personaMode === 'persona' && (
+              <div className="mb-4">
+                {trainedPersonas.length > 0 ? (
+                  <select
+                    value={selectedPersona}
+                    onChange={(e) => setSelectedPersona(e.target.value)}
+                    disabled={isGenerating || !canUsePersonaFeatures}
+                    className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
+                  >
+                    <option value="">Select a persona</option>
+                    {trainedPersonas.map((persona, index) => (
+                      <option key={index} value={persona}>
+                        {persona}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                    <p className="text-yellow-400 text-sm">
+                      No trained personas found. Train one in the Persona Lab.
+                      {' '}
+                      <Link href="/persona" className="underline ml-1">
+                        Train your first persona
+                      </Link>
+                      {' '}for consistent character results.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Mode Selector */}

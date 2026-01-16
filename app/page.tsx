@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ComponentType } from 'react';
 import { SiOpenai, SiFlux, SiElevenlabs } from 'react-icons/si';
 import { Sparkles, Film, PlayCircle, Zap, Video, FileText, ArrowRight, Upload, BrainCircuit, Image } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
@@ -31,7 +31,8 @@ type VideoFeature = {
   kind: 'video';
   title: string;
   description: string;
-  preview: () => JSX.Element;
+  poster: string;
+  preview: ComponentType;
 };
 
 type BeforeAfterFeature = {
@@ -47,25 +48,28 @@ const FEATURE_PREVIEWS: Array<VideoFeature | BeforeAfterFeature> = [
     kind: "video",
     title: "Video Studio",
     description: "Cinematic AI-generated video loop",
+    poster: "/images/video-studio-poster.jpg",
     preview: VideoStudioPreview,
   },
   {
     kind: "before-after",
     title: "Image Studio",
     description: "Before/after studio-grade transformation",
-    beforeImage: "/images/image-studio-before.svg",
-    afterImage: "/images/image-studio-after.svg",
+    beforeImage: "/images/image-studio-before.jpg",
+    afterImage: "/images/image-studio-after.jpg",
   },
   {
     kind: "video",
     title: "Viral / Entertainment",
     description: "Final viral-style clip",
+    poster: "/images/viral-preview-poster.jpg",
     preview: ViralPreview,
   },
   {
     kind: "video",
     title: "Ad Script",
     description: "Visual paired with a subtle voice waveform",
+    poster: "/images/ad-script-preview-poster.jpg",
     preview: AdScriptPreview,
   },
 ];
@@ -134,6 +138,7 @@ const AI_ENGINES = [
 }));
 
 export default function Home() {
+  const ENABLE_GENERATION = false;
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const heroEndRef = useRef<HTMLDivElement>(null);
@@ -161,16 +166,16 @@ export default function Home() {
     if (!node || shouldMountPreviews) return;
 
     let idleId: number | null = null;
-    let timeoutId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const scheduleMount = () => {
       const mount = () => setShouldMountPreviews(true);
       if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
         idleId = window.requestIdleCallback(() => {
-          timeoutId = window.setTimeout(mount, 200);
+          timeoutId = setTimeout(mount, 200);
         }, { timeout: 800 });
       } else {
-        timeoutId = window.setTimeout(mount, 300);
+        timeoutId = setTimeout(mount, 300);
       }
     };
 
@@ -319,16 +324,25 @@ export default function Home() {
                           </div>
                         </div>
                       </div>
+                    ) : !ENABLE_GENERATION ? (
+                      <img
+                        src={feature.poster}
+                        alt={`${feature.title} preview`}
+                        className="h-full w-full object-cover"
+                        loading="eager"
+                        decoding="async"
+                      />
                     ) : shouldMountPreviews ? (() => {
                       const Preview = feature.preview;
                       return <Preview />;
                     })() : (
                       <div className="h-full w-full">
                         <img
-                          src="/images/video-preview-poster.svg"
+                          src="/images/video-studio-poster.jpg"
                           alt={`${feature.title} preview`}
                           className="h-full w-full object-cover"
                           loading="lazy"
+                          decoding="async"
                         />
                       </div>
                     )}

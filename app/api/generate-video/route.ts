@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
 import { translate } from '@vitalets/google-translate-api';
+import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
 
 /**
  * Helper function to extract retry_after duration from 429 error responses
@@ -135,7 +136,24 @@ export async function POST(request: NextRequest) {
     console.log('=== VIDEO API REQUEST ===');
     console.log('Request Payload:', JSON.stringify(requestBody, null, 2));
 
-    const { images, descriptions, narrative, prompt, triggerWord, isTextOnly, mode } = requestBody;
+    const { images, descriptions, narrative, prompt, triggerWord, isTextOnly, mode, user, personaMode, personaId } = requestBody;
+
+    const wantsPersona = personaMode === 'persona' || !!triggerWord;
+    if (wantsPersona) {
+      const premiumCheck = requirePremium(user);
+      if (!premiumCheck.ok) {
+        return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
+      }
+
+      const personaCheck = await requirePersonaAccess({
+        user,
+        personaId,
+        requireReady: 'visual',
+      });
+      if (!personaCheck.ok) {
+        return NextResponse.json(personaCheck.body, { status: personaCheck.status });
+      }
+    }
 
     // Determine generation mode
     const isMultiImageMode = images && Array.isArray(images) && images.length > 0;

@@ -1,36 +1,21 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Persona-First Ads Studio
 
-## Getting Started
+A premium AI-powered content creation platform built for ads and creators. The platform focuses on generating content as a PERSONA, not just producing generic outputs—so every script, image, and video can reflect a consistent identity and voice.
 
-First, run the development server:
+## Core features
+- Persona-first content generation for ads and creators
+- Persona training for visual identity using 20 photos
+- Voice persona training from user-uploaded voice samples
+- Ad Script workflow: generate text first, then optionally convert to voice
+- Video and Image tools that can use generic AI or a trained persona
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Persona-based generation vs generic AI
+Generic AI generates content without a consistent identity. Persona-based generation produces content through a trained profile, so the output feels like a specific person or brand. This is the most valuable and expensive capability in the product, delivering consistent, high-quality creative across formats.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Free vs Premium
+Free usage focuses on generic AI generation. Premium unlocks persona training and persona-based generation across text, voice, image, and video—making it the core value of the platform.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Tech stack
+- Gemini for text intelligence and creative direction
+- Replicate for image and video generation
+- ElevenLabs for voice synthesis

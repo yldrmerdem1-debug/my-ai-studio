@@ -11,28 +11,41 @@ const plans = [
     price: '$19',
     period: '/month',
     features: [
-      '50 AI processes/month',
+      'Generate content',
+      'Generic AI identity',
       'HD quality output',
-      'Basic support',
       'Standard processing speed',
       'Watermark on exports',
     ],
     popular: false,
   },
   {
-    name: 'Pro',
+    name: 'Premium',
     price: '$49',
     period: '/month',
     features: [
-      'Unlimited AI processes',
+      'Generate content as YOU',
+      'Persona training (visual)',
+      'Consistent face across outputs',
       '4K quality output',
       'Priority support',
-      'Fast processing speed',
       'No watermark',
-      'API access',
-      'Custom integrations',
     ],
     popular: true,
+  },
+  {
+    name: 'Elite',
+    price: '$79',
+    period: '/month',
+    features: [
+      'Your face + your voice',
+      'Persona training (voice)',
+      'Voice persona generation',
+      'Fastest processing speed',
+      'Dedicated support',
+      'API access',
+    ],
+    popular: false,
   },
 ];
 
@@ -72,7 +85,7 @@ export default function PricingModal({ isOpen, onClose }: PricingModalProps) {
           <p className="mt-2 text-gray-400">Select the perfect plan for your needs</p>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           {plans.map((plan) => (
             <div
               key={plan.name}
