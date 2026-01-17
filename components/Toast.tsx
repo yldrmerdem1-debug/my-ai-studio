@@ -67,7 +67,7 @@ export default function Toast({ message, type = 'info', duration = 5000, onClose
 
   return (
     <div
-      className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-6 py-4 rounded-xl border backdrop-blur-md transition-all duration-300 ${
+      className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-6 py-4 rounded-xl border transition-all duration-300 ${
         config.bgColor
       } ${config.borderColor} ${isVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-full'}`}
     >

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
+import type { User } from '@/lib/subscription';
 
 type AdScriptRequest = {
   productDescription: string;
@@ -8,6 +9,16 @@ type AdScriptRequest = {
   personaMode?: 'generic' | 'persona';
   personaId?: string;
   user?: unknown;
+};
+
+const parseUser = (input: unknown): User | null => {
+  if (!input || typeof input !== 'object') return null;
+  const data = input as Partial<User>;
+  return {
+    id: typeof data.id === 'string' ? data.id : undefined,
+    plan: data.plan === 'free' || data.plan === 'premium' ? data.plan : undefined,
+    isPremium: typeof data.isPremium === 'boolean' ? data.isPremium : undefined,
+  };
 };
 
 export async function POST(request: NextRequest) {
@@ -30,7 +41,7 @@ export async function POST(request: NextRequest) {
     const triggerWord = body?.triggerWord?.trim();
     const personaMode = body?.personaMode === 'persona' || !!triggerWord;
     const personaId = body?.personaId;
-    const user = body?.user;
+    const user = parseUser(body?.user);
 
     console.log('Ad script request received', { productDescription });
 

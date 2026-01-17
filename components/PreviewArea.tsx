@@ -35,11 +35,11 @@ export default function PreviewArea({ originalImage, resultImage, isProcessing =
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       {/* Original */}
-      <div className="glass rounded-2xl p-6 shadow-2xl">
+      <div className="rounded-2xl p-6 border border-white/10 bg-black/40 shadow-md">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-400">ORIGINAL</h3>
         </div>
-        <div className="flex min-h-[400px] items-center justify-center rounded-lg bg-black/30 backdrop-blur-sm">
+        <div className="flex min-h-[400px] items-center justify-center rounded-lg bg-black/30">
           {originalImage ? (
             <img
               src={originalImage}
@@ -70,7 +70,7 @@ export default function PreviewArea({ originalImage, resultImage, isProcessing =
       </div>
 
       {/* AI Result */}
-      <div className="glass rounded-2xl p-6 shadow-2xl border border-[#00d9ff]/30">
+      <div className="rounded-2xl p-6 border border-[#00d9ff]/30 bg-black/40 shadow-md">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-[#00d9ff]">AI RESULT</h3>
           {resultImage && (
@@ -95,7 +95,7 @@ export default function PreviewArea({ originalImage, resultImage, isProcessing =
             </button>
           )}
         </div>
-        <div className="flex min-h-[400px] items-center justify-center rounded-lg bg-black/30 backdrop-blur-sm">
+        <div className="flex min-h-[400px] items-center justify-center rounded-lg bg-black/30">
           {isProcessing ? (
             <div className="text-center">
               <div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-[#00d9ff]/20 border-t-[#00d9ff]"></div>

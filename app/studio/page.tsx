@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
@@ -29,29 +29,10 @@ export default function StudioPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const targetInputRef = useRef<HTMLInputElement>(null);
-  const [personaMode, setPersonaMode] = useState<'generic' | 'persona'>('generic');
-  const [trainedPersonas, setTrainedPersonas] = useState<string[]>([]);
-  const [selectedPersona, setSelectedPersona] = useState<string>('');
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('trainedPersonas');
-      if (saved) {
-        try {
-          setTrainedPersonas(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load personas:', e);
-        }
-      }
-    }
-  }, []);
-
-  const getPersonaTriggerWord = () => {
-    return personaMode === 'persona' ? selectedPersona : '';
-  };
+  const [identityMode, setIdentityMode] = useState<'single' | 'persona'>('single');
 
   const getPersonaId = () => {
-    return personaMode === 'persona' ? persona?.id : undefined;
+    return identityMode === 'persona' ? persona?.id : undefined;
   };
 
   const requirePersonaReady = () => {
@@ -127,7 +108,7 @@ export default function StudioPage() {
       showToast('Please upload an image first', 'warning');
       return;
     }
-    if (personaMode === 'persona' && !requirePersonaReady()) {
+    if (identityMode === 'persona' && !requirePersonaReady()) {
       return;
     }
 
@@ -135,9 +116,8 @@ export default function StudioPage() {
     setResultImage(null);
 
     try {
-      const imageDataUrl = await fileToDataUrl(uploadedImage);
-      const triggerWord = getPersonaTriggerWord();
-      const personaId = getPersonaId();
+    const imageDataUrl = await fileToDataUrl(uploadedImage);
+    const personaId = getPersonaId();
 
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -147,9 +127,9 @@ export default function StudioPage() {
         body: JSON.stringify({
           action: 'remove-background',
           image: imageDataUrl,
-          triggerWord: triggerWord || undefined,
+          triggerWord: undefined,
           personaId,
-          personaMode,
+          personaMode: identityMode === 'persona' ? 'persona' : 'generic',
           personaStatus: persona?.visualStatus ?? 'none',
           user,
         }),
@@ -186,7 +166,7 @@ export default function StudioPage() {
       showToast('Please upload an image first', 'warning');
       return;
     }
-    if (personaMode === 'persona' && !requirePersonaReady()) {
+    if (identityMode === 'persona' && !requirePersonaReady()) {
       return;
     }
 
@@ -194,9 +174,8 @@ export default function StudioPage() {
     setResultImage(null);
 
     try {
-      const imageDataUrl = await fileToDataUrl(uploadedImage);
-      const triggerWord = getPersonaTriggerWord();
-      const personaId = getPersonaId();
+    const imageDataUrl = await fileToDataUrl(uploadedImage);
+    const personaId = getPersonaId();
 
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -207,9 +186,9 @@ export default function StudioPage() {
           action: 'studio-background',
           image: imageDataUrl,
           prompt: backgroundPrompt || 'professional studio background, clean white background, high quality photography',
-          triggerWord: triggerWord || undefined,
+          triggerWord: undefined,
           personaId,
-          personaMode,
+          personaMode: identityMode === 'persona' ? 'persona' : 'generic',
           personaStatus: persona?.visualStatus ?? 'none',
           user,
         }),
@@ -333,67 +312,57 @@ export default function StudioPage() {
           </div>
 
           <div className="glass rounded-2xl p-6 mb-8">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <h2 className="text-xl font-semibold text-white">Use Persona</h2>
-              <span className="text-xs text-white/50">Requires ready visual persona</span>
+            <div className="flex items-center justify-between gap-4 mb-2">
+              <h2 className="text-xl font-semibold text-white">Identity Mode</h2>
             </div>
-            <div className="flex items-center justify-between gap-4 mb-6">
-              <div>
-                <p className="text-sm text-gray-300">
-                  {personaMode === 'persona'
-                    ? 'Persona mode enabled — consistent identity across generations.'
-                    : 'Generic mode — no persona reference.'}
-                </p>
-              </div>
+            <p className="text-sm text-gray-400 mb-5">
+              Single Photo edits this image once. Persona keeps your identity consistent across all generations.
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <button
                 type="button"
-                onClick={() => setPersonaMode(personaMode === 'persona' ? 'generic' : 'persona')}
-                className={`relative inline-flex h-8 w-16 items-center rounded-full transition-colors ${
-                  personaMode === 'persona' ? 'bg-[#00d9ff]' : 'bg-white/10'
+                onClick={() => setIdentityMode('single')}
+                className={`rounded-lg border px-4 py-3 text-left transition-all ${
+                  identityMode === 'single'
+                    ? 'border-[#00d9ff]/60 bg-[#00d9ff]/10 text-white'
+                    : 'border-white/10 text-gray-300 hover:border-[#00d9ff]/30 hover:bg-white/5'
+                }`}
+                disabled={isProcessing}
+              >
+                <div className="text-sm font-semibold">Single Photo</div>
+                <div className="text-xs text-white/50">Default</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIdentityMode('persona')}
+                className={`rounded-lg border px-4 py-3 text-left transition-all ${
+                  identityMode === 'persona'
+                    ? 'border-[#00d9ff]/60 bg-[#00d9ff]/10 text-white'
+                    : 'border-white/10 text-gray-300 hover:border-[#00d9ff]/30 hover:bg-white/5'
                 }`}
                 disabled={isProcessing || !canUsePersonaFeatures || !personaReady}
-                aria-pressed={personaMode === 'persona'}
+                title={
+                  !personaReady
+                    ? 'Create a Persona for consistent identity across images and videos.'
+                    : !canUsePersonaFeatures
+                      ? 'Upgrade to Premium to use your Persona.'
+                      : ''
+                }
               >
-                <span
-                  className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
-                    personaMode === 'persona' ? 'translate-x-9' : 'translate-x-1'
-                  }`}
-                />
+                <div className="text-sm font-semibold">Use My Persona 🔒 Premium</div>
+                <div className="text-xs text-white/50">Consistent identity</div>
               </button>
             </div>
             {!canUsePersonaFeatures && (
-              <p className="text-sm text-yellow-400 mb-4">
-                Premium required to enable Persona Mode.
-              </p>
-            )}
-            {canUsePersonaFeatures && !personaReady && (
-              <p className="text-sm text-yellow-400 mb-4">
-                Persona Mode is disabled until your visual persona is ready.
-              </p>
-            )}
-
-            {personaMode === 'persona' && (
-              <div className="max-w-md">
-                <label className="block text-sm font-medium text-gray-300 mb-2">Trained Persona</label>
-                {trainedPersonas.length > 0 ? (
-                  <select
-                    value={selectedPersona}
-                    onChange={(event) => setSelectedPersona(event.target.value)}
-                    disabled={isProcessing}
-                    className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
-                  >
-                    <option value="">Optional: select a trigger word</option>
-                    {trainedPersonas.map((persona, index) => (
-                      <option key={`${persona}-${index}`} value={persona}>
-                        {persona}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <p className="text-sm text-yellow-400">
-                    No trained personas found. Train one in the Persona Lab first.
-                  </p>
-                )}
+              <div className="mt-4 flex items-center justify-between gap-4 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
+                <p className="text-sm text-yellow-300">Upgrade to Premium to use your Persona.</p>
+                <button
+                  type="button"
+                  onClick={() => setIsPricingModalOpen(true)}
+                  className="rounded-lg bg-[#00d9ff] px-4 py-2 text-sm font-semibold text-black hover:bg-[#00b8d9] transition-colors"
+                >
+                  Upgrade to Premium
+                </button>
               </div>
             )}
           </div>

@@ -459,6 +459,9 @@ export default function PersonaPage() {
                 PREMIUM
               </span>
             </div>
+            <p className="text-gray-300 text-base mb-2">
+              One persona, trained once, used across every tool.
+            </p>
             <p className="text-gray-400 text-lg">
               Train your custom AI model. Upload exactly 20 high-quality images to create your digital twin. Use your unique trigger word to generate consistent personas in all your creations.
             </p>
@@ -479,8 +482,8 @@ export default function PersonaPage() {
               </span>
             </div>
 
-            {!canTrainVisual ? (
-              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center">
+            {!canTrainVisual && (
+              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center mb-6">
                 <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
                   <Lock className="w-4 h-4" />
                   <span>Premium required for visual persona training.</span>
@@ -492,89 +495,92 @@ export default function PersonaPage() {
                   Upgrade to Premium
                 </button>
               </div>
-            ) : (
-              <>
-                <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
+            )}
+            <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
+              <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
+            </p>
+
+            {/* File Upload Buttons */}
+            <div className="flex gap-4 mb-6">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isTraining || !canTrainVisual}
+                className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <Camera className="w-4 h-4" /> Upload Images (Multiple)
+              </button>
+
+              <input
+                ref={zipInputRef}
+                type="file"
+                accept=".zip"
+                onChange={handleZipUpload}
+                className="hidden"
+              />
+              <button
+                onClick={() => zipInputRef.current?.click()}
+                disabled={isTraining || !canTrainVisual}
+                className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                📦 Upload ZIP File
+              </button>
+            </div>
+
+            {!canTrainVisual && (
+              <p className="text-sm text-yellow-300 mb-4">
+                Visual uploads are visible but disabled on the free plan.
+              </p>
+            )}
+
+            {/* Uploaded Files List */}
+            {uploadedFiles.length > 0 && (
+              <div className="mb-6">
+                <p className="text-sm text-gray-400 mb-3">
+                  {uploadedFiles.length} / 20 images uploaded
                 </p>
-
-                {/* File Upload Buttons */}
-                <div className="flex gap-4 mb-6">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={handleFileSelect}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isTraining || !canTrainVisual}
-                    className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    <Camera className="w-4 h-4" /> Upload Images (Multiple)
-                  </button>
-
-                  <input
-                    ref={zipInputRef}
-                    type="file"
-                    accept=".zip"
-                    onChange={handleZipUpload}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => zipInputRef.current?.click()}
-                    disabled={isTraining || !canTrainVisual}
-                    className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    📦 Upload ZIP File
-                  </button>
-                </div>
-
-                {/* Uploaded Files List */}
-                {uploadedFiles.length > 0 && (
-                  <div className="mb-6">
-                    <p className="text-sm text-gray-400 mb-3">
-                      {uploadedFiles.length} / 20 images uploaded
-                    </p>
-                    <div className="grid grid-cols-5 gap-4">
-                      {uploadedFiles.map((file, index) => (
-                        <div key={index} className="relative group">
-                          <img
-                            src={URL.createObjectURL(file)}
-                            alt={`Upload ${index + 1}`}
-                            className="w-full h-32 object-cover rounded-lg"
-                          />
-                          {!isTraining && (
-                            <button
-                              onClick={() => removeFile(index)}
-                              className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                            >
-                              ×
-                            </button>
-                          )}
-                        </div>
-                      ))}
+                <div className="grid grid-cols-5 gap-4">
+                  {uploadedFiles.map((file, index) => (
+                    <div key={index} className="relative group">
+                      <img
+                        src={URL.createObjectURL(file)}
+                        alt={`Upload ${index + 1}`}
+                        className="w-full h-32 object-cover rounded-lg"
+                      />
+                      {!isTraining && (
+                        <button
+                          onClick={() => removeFile(index)}
+                          className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
-                  </div>
-                )}
+                  ))}
+                </div>
+              </div>
+            )}
 
-                {/* Training Button */}
-                <button
-                  onClick={startTraining}
-                  disabled={isTraining || uploadedFiles.length < 20 || !canTrainVisual}
-                  className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isTraining ? 'Training in Progress...' : '🚀 Train My AI Persona'}
-                </button>
+            {/* Training Button */}
+            <button
+              onClick={startTraining}
+              disabled={isTraining || uploadedFiles.length < 20 || !canTrainVisual}
+              className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isTraining ? 'Training in Progress...' : '🚀 Train My AI Persona'}
+            </button>
 
-                {uploadedFiles.length < 20 && uploadedFiles.length > 0 && (
-                  <p className="mt-4 text-sm text-yellow-400 text-center">
-                    Upload {20 - uploadedFiles.length} more image(s) to reach 20
-                  </p>
-                )}
-              </>
+            {uploadedFiles.length < 20 && uploadedFiles.length > 0 && (
+              <p className="mt-4 text-sm text-yellow-400 text-center">
+                Upload {20 - uploadedFiles.length} more image(s) to reach 20
+              </p>
             )}
           </div>
 
@@ -586,14 +592,17 @@ export default function PersonaPage() {
                 <p className="text-gray-400">
                   Upload voice samples totaling 2–5 minutes. Clear audio with varied tones works best.
                 </p>
+                <p className="text-gray-500 text-sm mt-2">
+                  Voice personas power AI voiceovers in scripts and ads.
+                </p>
               </div>
               <span className="px-3 py-1 text-xs font-semibold rounded-full bg-white/10 text-white">
                 Status: {voiceStatus}
               </span>
             </div>
 
-            {!canTrainVoice ? (
-              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center">
+            {!canTrainVoice && (
+              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center mb-6">
                 <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
                   <Lock className="w-4 h-4" />
                   <span>Premium required for voice persona training.</span>
@@ -605,57 +614,60 @@ export default function PersonaPage() {
                   Upgrade to Premium
                 </button>
               </div>
-            ) : (
-              <>
-                <div className="flex gap-4 mb-6">
-                  <input
-                    ref={voiceInputRef}
-                    type="file"
-                    accept="audio/*"
-                    multiple
-                    onChange={handleVoiceSelect}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => voiceInputRef.current?.click()}
-                    disabled={isVoiceTraining || !canTrainVoice}
-                    className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    <Mic className="w-4 h-4" /> Upload Voice Samples
-                  </button>
-                  {voiceFiles.length > 0 && (
-                    <button
-                      onClick={() => {
-                        setVoiceFiles([]);
-                        setVoiceDurationSec(0);
-                      }}
-                      className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-white/5 border border-white/10 transition-all"
-                    >
-                      Clear Samples
-                    </button>
-                  )}
-                </div>
-
-                {voiceFiles.length > 0 && (
-                  <div className="mb-4 text-sm text-gray-300">
-                    Total duration: <span className="text-white font-semibold">{formatDuration(voiceDurationSec)}</span>
-                  </div>
-                )}
-                {voiceDurationSec > 0 && (voiceDurationSec < 120 || voiceDurationSec > 300) && (
-                  <p className="text-sm text-yellow-400 mb-4">
-                    Voice samples must total between 2–5 minutes.
-                  </p>
-                )}
-
-                <button
-                  onClick={startVoiceTraining}
-                  disabled={isVoiceTraining || voiceDurationSec < 120 || voiceDurationSec > 300 || !canTrainVoice}
-                  className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isVoiceTraining ? 'Training in Progress...' : '🎙️ Train My Voice Persona'}
-                </button>
-              </>
             )}
+            <div className="flex gap-4 mb-6">
+              <input
+                ref={voiceInputRef}
+                type="file"
+                accept="audio/*"
+                multiple
+                onChange={handleVoiceSelect}
+                className="hidden"
+              />
+              <button
+                onClick={() => voiceInputRef.current?.click()}
+                disabled={isVoiceTraining || !canTrainVoice}
+                className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <Mic className="w-4 h-4" /> Upload Voice Samples
+              </button>
+              {voiceFiles.length > 0 && (
+                <button
+                  onClick={() => {
+                    setVoiceFiles([]);
+                    setVoiceDurationSec(0);
+                  }}
+                  className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-white/5 border border-white/10 transition-all"
+                >
+                  Clear Samples
+                </button>
+              )}
+            </div>
+
+            {!canTrainVoice && (
+              <p className="text-sm text-yellow-300 mb-4">
+                Voice uploads are visible but disabled on the free plan.
+              </p>
+            )}
+
+            {voiceFiles.length > 0 && (
+              <div className="mb-4 text-sm text-gray-300">
+                Total duration: <span className="text-white font-semibold">{formatDuration(voiceDurationSec)}</span>
+              </div>
+            )}
+            {voiceDurationSec > 0 && (voiceDurationSec < 120 || voiceDurationSec > 300) && (
+              <p className="text-sm text-yellow-400 mb-4">
+                Voice samples must total between 2–5 minutes.
+              </p>
+            )}
+
+            <button
+              onClick={startVoiceTraining}
+              disabled={isVoiceTraining || voiceDurationSec < 120 || voiceDurationSec > 300 || !canTrainVoice}
+              className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isVoiceTraining ? 'Training in Progress...' : '🎙️ Train My Voice Persona'}
+            </button>
           </div>
 
           {/* Cinematic Training Progress Screen */}
@@ -682,7 +694,7 @@ export default function PersonaPage() {
                 </div>
 
                 {triggerWord && (
-                  <div className="mb-6 p-5 bg-gradient-to-r from-[#00d9ff]/20 to-[#0099cc]/20 rounded-xl border-2 border-[#00d9ff]/50 backdrop-blur-sm">
+                  <div className="mb-6 p-5 bg-gradient-to-r from-[#00d9ff]/20 to-[#0099cc]/20 rounded-xl border-2 border-[#00d9ff]/50">
                     <div className="flex items-center gap-2 mb-2">
                       <Target className="w-5 h-5 text-[#00d9ff]" style={{ filter: 'drop-shadow(0 0 6px #00d9ff)' }} />
                       <p className="text-sm font-semibold text-gray-300 uppercase tracking-wide">Your Unique Trigger Word</p>
@@ -704,7 +716,7 @@ export default function PersonaPage() {
                     <span className="text-gray-300 font-medium">{trainingStatus}</span>
                     <span className="text-[#00d9ff] font-bold text-lg">{Math.round(trainingProgress)}%</span>
                   </div>
-                  <div className="relative w-full bg-gray-800/50 rounded-full h-6 overflow-hidden backdrop-blur-sm border border-gray-700">
+                  <div className="relative w-full bg-gray-800/50 rounded-full h-6 overflow-hidden border border-gray-700">
                     {/* Animated gradient bar */}
                     <div
                       className="relative h-full bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] transition-all duration-700 ease-out shadow-lg"

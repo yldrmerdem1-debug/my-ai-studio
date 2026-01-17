@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { SplineScene } from '@/components/ui/splite';
 
 interface HeroSectionProps {
@@ -10,16 +10,13 @@ interface HeroSectionProps {
 }
 
 export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
-  const router = useRouter();
   const heroRef = useRef<HTMLElement>(null);
-  const [scrollProgress, setScrollProgress] = useState(0);
   
   // Intro sequence states
   const [introStage, setIntroStage] = useState<'initial' | 'robot-move' | 'headline' | 'subtext-1' | 'subtext-2' | 'cta' | 'complete'>('initial');
   const [robotScale, setRobotScale] = useState(0.8); // Start smaller for scale-up animation
   const [robotOpacity, setRobotOpacity] = useState(0); // Start invisible for fade-in
   const [robotTranslateX, setRobotTranslateX] = useState(0);
-  const [textOpacity, setTextOpacity] = useState(0);
   const [headlineOpacity, setHeadlineOpacity] = useState(0);
   const [subtext1Opacity, setSubtext1Opacity] = useState(0);
   const [subtext2Opacity, setSubtext2Opacity] = useState(0);
@@ -72,41 +69,16 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
     };
   }, []);
 
-  // Scroll-based animations (only after intro completes)
   useEffect(() => {
-    if (introStage !== 'complete') return;
-
-    const handleScroll = () => {
-      if (!heroRef.current) return;
-      
-      const rect = heroRef.current.getBoundingClientRect();
-      const windowHeight = window.innerHeight;
-      const heroHeight = heroRef.current.offsetHeight;
-      
-      const progress = Math.max(0, Math.min(1, (windowHeight - rect.top) / heroHeight));
-      setScrollProgress(progress);
-      onScrollProgress?.(progress);
-
-      // Apply scroll-based transforms
-      const scrollScale = Math.max(0.7, 1 - progress * 0.3);
-      const scrollTranslateX = progress * 100;
-      setRobotScale(Math.max(0.7, 0.85 - progress * 0.15));
-      setRobotTranslateX(80 + scrollTranslateX * 0.5);
-      // Keep text high contrast - no fade to gray
-      setTextOpacity(Math.max(0.8, 1 - progress * 0.2));
-    };
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll();
-
-    return () => window.removeEventListener('scroll', handleScroll);
+    if (introStage === 'complete') {
+      onScrollProgress?.(0);
+    }
   }, [introStage, onScrollProgress]);
-
                     return (
     <section 
       ref={heroRef}
       className="relative h-screen w-screen flex items-center justify-center overflow-hidden"
-      style={{ margin: 0, padding: 0 }}
+      style={{ margin: 0, padding: 0, contain: 'layout paint' }}
     >
       {/* Animated Gradient Background - Full-bleed with ambient motion */}
       <div className="absolute inset-0 z-0 overflow-hidden">
@@ -114,30 +86,17 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
         <div className="absolute inset-0 bg-gradient-to-r from-gray-950 via-black to-gray-950" />
         
         {/* Animated left side gradient - stronger cyan glow with motion */}
-        <div 
-          className="absolute left-0 top-0 bottom-0 w-1/2 bg-gradient-to-r from-[#00d9ff]/25 via-[#00d9ff]/12 to-transparent"
-          style={{
-            animation: 'gradient-pulse 6s ease-in-out infinite',
-            willChange: 'transform',
-          }}
-        />
+        <div className="absolute left-0 top-0 bottom-0 w-1/2 bg-gradient-to-r from-[#00d9ff]/12 via-[#00d9ff]/6 to-transparent" />
         
         {/* Animated right side gradient - stronger blue glow with motion */}
-        <div 
-          className="absolute right-0 top-0 bottom-0 w-1/2 bg-gradient-to-l from-[#0099ff]/25 via-[#0099ff]/12 to-transparent"
-          style={{
-            animation: 'gradient-pulse 8s ease-in-out infinite',
-            animationDelay: '2s',
-            willChange: 'transform',
-          }}
-        />
+        <div className="absolute right-0 top-0 bottom-0 w-1/2 bg-gradient-to-l from-[#0099ff]/12 via-[#0099ff]/6 to-transparent" />
         
         {/* Center dominant glow - matches robot position */}
         <div
           className="absolute inset-0"
           style={{
             backgroundImage:
-              'radial-gradient(circle at 50% 50%, rgba(0, 217, 255, 0.16), transparent 55%), radial-gradient(circle at 75% 70%, rgba(0, 153, 255, 0.12), transparent 60%)',
+              'radial-gradient(circle at 50% 50%, rgba(0, 217, 255, 0.08), transparent 60%)',
           }}
         />
                 </div>
@@ -152,7 +111,6 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
             ? 'opacity 0.8s ease-out, transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)' 
             : 'transform 1.2s cubic-bezier(0.4, 0, 0.2, 1)',
           objectFit: 'cover',
-          willChange: 'transform',
         }}
       >
         <SplineScene 
@@ -160,23 +118,13 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
           className="!border-0 !bg-transparent !rounded-none !min-h-0 w-full h-full"
           showControls={false}
         />
-        {/* Robot glow overlay */}
-        <div 
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            background: 'radial-gradient(circle at center, transparent 30%, rgba(0, 217, 255, 0.1) 70%, transparent 100%)',
-            mixBlendMode: 'screen',
-            animation: 'glow-drift 5s ease-in-out infinite',
-            willChange: 'transform',
-          }}
-        />
       </div>
 
       {/* Text Content - Left side, appears after robot moves */}
       <div 
         className="absolute left-4 lg:left-20 top-1/2 -translate-y-1/2 z-30 text-left space-y-6 lg:space-y-8 max-w-[90%] lg:max-w-2xl pointer-events-auto"
         style={{
-          opacity: textOpacity || (introStage !== 'initial' ? 1 : 0),
+          opacity: introStage !== 'initial' ? 1 : 0,
           transition: 'opacity 0.6s ease-out',
         }}
       >
@@ -188,26 +136,15 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
             }}
           >
             <h1 className="text-4xl sm:text-5xl lg:text-7xl font-bold leading-tight">
-              <span className="text-white drop-shadow-[0_0_30px_rgba(255,255,255,0.5)]">Your</span>{' '}
+              <span className="text-white">Your</span>{' '}
               <span className="relative inline-block">
                 <span 
                   className="relative z-10 bg-gradient-to-r from-[#00d9ff] via-[#00d9ff] to-[#0099ff] bg-clip-text text-transparent"
-                  style={{
-                    textShadow: '0 0 40px rgba(0, 217, 255, 0.8), 0 0 80px rgba(0, 217, 255, 0.4)',
-                    filter: 'drop-shadow(0 0 20px rgba(0, 217, 255, 0.9))',
-                  }}
                 >
                   AI
                 </span>
-                <span 
-                  className="absolute inset-0 bg-[#00d9ff] blur-3xl opacity-80 -z-10"
-                  style={{
-                    filter: 'blur(30px)',
-                    animation: 'glow-pulse 3s ease-in-out infinite',
-                  }}
-                />
               </span>
-              {' '}<span className="text-white drop-shadow-[0_0_30px_rgba(255,255,255,0.5)]">Persona</span>
+              {' '}<span className="text-white">Persona</span>
             </h1>
           </div>
 
@@ -219,7 +156,7 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
                 opacity: subtext1Opacity,
                 transition: 'opacity 0.8s ease-out',
                 color: '#ffffff',
-                textShadow: '0 2px 40px rgba(0, 0, 0, 0.95), 0 0 20px rgba(255, 255, 255, 0.1), 0 0 40px rgba(0, 217, 255, 0.2)',
+                textShadow: '0 2px 20px rgba(0, 0, 0, 0.7)',
               }}
             >
               Train once. Create everywhere.
@@ -230,7 +167,7 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
                 opacity: subtext2Opacity,
                 transition: 'opacity 0.8s ease-out',
                 color: '#ffffff',
-                textShadow: '0 2px 40px rgba(0, 0, 0, 0.95), 0 0 20px rgba(255, 255, 255, 0.15)',
+                textShadow: '0 2px 20px rgba(0, 0, 0, 0.7)',
               }}
             >
               Upload 20 photos. Generate videos, ads, and images that look like you.
@@ -248,56 +185,25 @@ export default function HeroSection({ onScrollProgress }: HeroSectionProps) {
               zIndex: 9999,
               position: 'relative',
             }}
-            onClick={(e) => {
-              e.stopPropagation();
-            }}
           >
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (e.nativeEvent) {
-                  e.nativeEvent.stopImmediatePropagation();
-                }
-                router.push('/persona');
-              }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              className="group relative inline-flex items-center gap-3 px-8 py-4 lg:px-10 lg:py-5 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold text-base lg:text-lg rounded-xl overflow-hidden transition-all duration-300 hover:scale-105 cursor-pointer"
+            <Link
+              href="/persona"
+              className="relative inline-flex items-center gap-3 px-8 py-4 lg:px-10 lg:py-5 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold text-base lg:text-lg rounded-xl overflow-hidden cursor-pointer"
               style={{
-                boxShadow: '0 0 50px rgba(0, 217, 255, 0.7), 0 0 100px rgba(0, 153, 255, 0.4), inset 0 0 30px rgba(255, 255, 255, 0.1)',
-                animation: ctaOpacity ? 'cta-glow 2.5s ease-in-out infinite' : 'none',
-                filter: 'brightness(1.1)',
+                boxShadow: '0 0 12px rgba(0, 217, 255, 0.3)',
                 pointerEvents: 'auto',
                 zIndex: 10000,
                 position: 'relative',
               }}
             >
-              {/* Button Background Glow */}
-              <div 
-                className="absolute inset-0 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] opacity-50 blur-2xl -z-10 pointer-events-none"
-                    style={{
-                  animation: 'glow-pulse 2s ease-in-out infinite',
-                }}
-              />
-              
-              {/* Button Hover Glow Effect */}
-              <div className="absolute inset-0 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] opacity-0 group-hover:opacity-100 blur-xl transition-opacity pointer-events-none" />
-              
               {/* Button Content with inner glow */}
               <span 
                 className="relative z-10 flex items-center gap-3 pointer-events-none"
-                style={{
-                  textShadow: '0 0 20px rgba(255, 255, 255, 0.5)',
-                }}
               >
                 Start Training
-                <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" />
+                <ArrowRight className="w-5 h-5" />
               </span>
-            </button>
+            </Link>
           </div>
       </div>
 

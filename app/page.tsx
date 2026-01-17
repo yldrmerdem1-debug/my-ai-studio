@@ -1,13 +1,12 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ComponentType } from 'react';
 import { SiOpenai, SiFlux, SiElevenlabs } from 'react-icons/si';
-import { Sparkles, Film, PlayCircle, Zap, Video, FileText, ArrowRight, Upload, BrainCircuit, Image } from 'lucide-react';
+import { Sparkles, Film, PlayCircle, Zap, Video, FileText, Upload, BrainCircuit, Image } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import HeroSection from '@/components/HeroSection';
-import { VideoStudioPreview, ViralPreview, AdScriptPreview } from '@/components/PreviewVideos';
-import Link from 'next/link';
+import { AdScriptPreview } from '@/components/PreviewVideos';
 
 const FLOW_STEPS = [
   {
@@ -32,7 +31,7 @@ type VideoFeature = {
   title: string;
   description: string;
   poster: string;
-  preview: ComponentType;
+  src: string;
 };
 
 type BeforeAfterFeature = {
@@ -43,13 +42,20 @@ type BeforeAfterFeature = {
   afterImage: string;
 };
 
-const FEATURE_PREVIEWS: Array<VideoFeature | BeforeAfterFeature> = [
+type CustomFeature = {
+  kind: 'custom';
+  title: string;
+  description: string;
+  preview: ComponentType;
+};
+
+const FEATURE_PREVIEWS: Array<VideoFeature | BeforeAfterFeature | CustomFeature> = [
   {
     kind: "video",
     title: "Video Studio",
     description: "Cinematic AI-generated video loop",
     poster: "/images/video-studio-poster.jpg",
-    preview: VideoStudioPreview,
+    src: "/videos/video-studio-preview.mp4",
   },
   {
     kind: "before-after",
@@ -63,13 +69,12 @@ const FEATURE_PREVIEWS: Array<VideoFeature | BeforeAfterFeature> = [
     title: "Viral / Entertainment",
     description: "Final viral-style clip",
     poster: "/images/viral-preview-poster.jpg",
-    preview: ViralPreview,
+    src: "/videos/viral-preview.mp4",
   },
   {
-    kind: "video",
+    kind: "custom",
     title: "Ad Script",
     description: "Visual paired with a subtle voice waveform",
-    poster: "/images/ad-script-preview-poster.jpg",
     preview: AdScriptPreview,
   },
 ];
@@ -79,6 +84,86 @@ const hexToRgba = (hex: string, alpha: number) => {
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+type HoverPlayVideoProps = {
+  src: string;
+  poster: string;
+};
+
+const HoverPlayVideo = ({ src, poster }: HoverPlayVideoProps) => {
+  return (
+    <div className="relative h-full w-full overflow-hidden">
+      <img
+        src={poster}
+        alt="Preview poster"
+        className="absolute inset-0 h-full w-full object-cover opacity-100 group-hover:opacity-0"
+        loading="eager"
+        decoding="async"
+      />
+      <video
+        src={src}
+        muted
+        loop
+        playsInline
+        preload="auto"
+        autoPlay
+        className="absolute inset-0 h-full w-full object-cover opacity-0 group-hover:opacity-100"
+      />
+    </div>
+  );
+};
+
+type Feature = VideoFeature | BeforeAfterFeature | CustomFeature;
+
+type FeatureCardProps = {
+  feature: Feature;
+};
+
+const FeatureCard = ({ feature }: FeatureCardProps) => {
+  return (
+    <div
+      className="group perf-card rounded-2xl border border-white/10 bg-white/5 overflow-hidden"
+    >
+      <div className="relative aspect-video">
+        {feature.kind === "before-after" ? (
+          <div className="grid h-full grid-cols-2">
+            <div className="relative">
+              <img
+                src={feature.beforeImage}
+                alt="Before - raw photo"
+                className="h-full w-full object-cover"
+              />
+              <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold text-white">
+                BEFORE
+              </div>
+            </div>
+            <div className="relative">
+              <img
+                src={feature.afterImage}
+                alt="After - studio image"
+                className="h-full w-full object-cover"
+              />
+              <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold text-white">
+                AFTER
+              </div>
+            </div>
+          </div>
+        ) : feature.kind === "custom" ? (
+          <feature.preview />
+        ) : (
+          <HoverPlayVideo
+            src={feature.src}
+            poster={feature.poster}
+          />
+        )}
+      </div>
+      <div className="p-6 space-y-2">
+        <h3 className="text-xl font-semibold text-white">{feature.title}</h3>
+        <p className="text-white">{feature.description}</p>
+      </div>
+    </div>
+  );
 };
 
 const AI_ENGINES = [
@@ -138,12 +223,9 @@ const AI_ENGINES = [
 }));
 
 export default function Home() {
-  const ENABLE_GENERATION = false;
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const heroEndRef = useRef<HTMLDivElement>(null);
-  const previewSectionRef = useRef<HTMLDivElement>(null);
-  const [shouldMountPreviews, setShouldMountPreviews] = useState(false);
 
   useEffect(() => {
     // Show sidebar after hero section is scrolled past
@@ -160,48 +242,6 @@ export default function Home() {
 
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
-
-  useEffect(() => {
-    const node = previewSectionRef.current;
-    if (!node || shouldMountPreviews) return;
-
-    let idleId: number | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    const scheduleMount = () => {
-      const mount = () => setShouldMountPreviews(true);
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        idleId = window.requestIdleCallback(() => {
-          timeoutId = setTimeout(mount, 200);
-        }, { timeout: 800 });
-      } else {
-        timeoutId = setTimeout(mount, 300);
-      }
-    };
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          // Delay mount slightly to avoid competing with hero/sidebar transition.
-          scheduleMount();
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '0px 0px -15% 0px', threshold: 0.1 }
-    );
-
-    observer.observe(node);
-
-    return () => {
-      observer.disconnect();
-      if (idleId !== null && 'cancelIdleCallback' in window) {
-        window.cancelIdleCallback(idleId);
-      }
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [shouldMountPreviews]);
 
   return (
     <div className="relative min-h-screen bg-black overflow-x-hidden">
@@ -283,7 +323,7 @@ export default function Home() {
 
         {/* Section 3 - Feature Previews */}
         {/* perf-section keeps offscreen content from painting during scroll */}
-        <section ref={previewSectionRef} className="relative py-24 px-8 perf-section">
+        <section className="relative py-24 px-8 perf-section">
           <div className="container mx-auto max-w-6xl">
             <div className="text-center mb-14">
               <h2 className="text-3xl lg:text-4xl font-bold text-white mb-4">
@@ -296,62 +336,10 @@ export default function Home() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {FEATURE_PREVIEWS.map((feature) => (
-                <div
+                <FeatureCard
                   key={feature.title}
-                  className="group perf-card rounded-2xl border border-white/10 bg-white/5 overflow-hidden transition-transform transition-shadow transition-colors duration-300 hover:-translate-y-1 hover:border-[#00d9ff]/40 hover:shadow-[0_20px_80px_rgba(0,217,255,0.2)]"
-                >
-                  <div className="relative aspect-video">
-                    {feature.kind === "before-after" ? (
-                      <div className="grid h-full grid-cols-2">
-                        <div className="relative">
-                          <img
-                            src={feature.beforeImage}
-                            alt="Before - raw photo"
-                            className="h-full w-full object-cover"
-                          />
-                          <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold text-white">
-                            BEFORE
-                          </div>
-                        </div>
-                        <div className="relative">
-                          <img
-                            src={feature.afterImage}
-                            alt="After - studio image"
-                            className="h-full w-full object-cover"
-                          />
-                          <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold text-white">
-                            AFTER
-                          </div>
-                        </div>
-                      </div>
-                    ) : !ENABLE_GENERATION ? (
-                      <img
-                        src={feature.poster}
-                        alt={`${feature.title} preview`}
-                        className="h-full w-full object-cover"
-                        loading="eager"
-                        decoding="async"
-                      />
-                    ) : shouldMountPreviews ? (() => {
-                      const Preview = feature.preview;
-                      return <Preview />;
-                    })() : (
-                      <div className="h-full w-full">
-                        <img
-                          src="/images/video-studio-poster.jpg"
-                          alt={`${feature.title} preview`}
-                          className="h-full w-full object-cover"
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-6 space-y-2">
-                    <h3 className="text-xl font-semibold text-white">{feature.title}</h3>
-                    <p className="text-white">{feature.description}</p>
-                  </div>
-                </div>
+                  feature={feature}
+                />
               ))}
             </div>
           </div>
@@ -371,8 +359,8 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-white">
               {[
-                'No prompt engineering required',
-                'One AI persona across all tools',
+                'No prompts. Just results.',
+                'One AI persona, trained once, used everywhere.',
                 'Consistent face, style, and identity',
                 'Built for creators, not engineers',
               ].map((item) => (
@@ -394,13 +382,12 @@ export default function Home() {
             Your AI persona works seamlessly across industry-leading AI models.
           </p>
           {/* Dynamic Section Header */}
-          <div className="flex items-center justify-center gap-3 mb-6 group">
+          <div className="flex items-center justify-center gap-3 mb-6">
             <h2 className="text-sm font-medium bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
               Powered by Industry-Leading AI Models
             </h2>
             <div className="relative">
-              <div className="w-2 h-2 rounded-full bg-green-400 group-hover:animate-pulse" style={{ boxShadow: '0 0 8px rgba(74, 222, 128, 0.8)' }} />
-              <div className="absolute inset-0 w-2 h-2 rounded-full bg-green-400 opacity-75 group-hover:animate-ping" />
+              <div className="w-2 h-2 rounded-full bg-green-400" style={{ boxShadow: '0 0 6px rgba(74, 222, 128, 0.6)' }} />
             </div>
           </div>
           
@@ -422,8 +409,8 @@ export default function Home() {
                     
                     {/* Info Tag - Shows on Hover */}
                     {engine.techInfo && (
-                      <div className="info-tag absolute top-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10">
-                        <div className="bg-black/80 backdrop-blur-md px-2 py-1 rounded-lg border border-white/20 text-[9px] text-white whitespace-nowrap">
+                    <div className="info-tag absolute top-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10">
+                      <div className="bg-black/80 px-2 py-1 rounded-lg border border-white/20 text-[9px] text-white whitespace-nowrap">
                           {engine.techInfo}
                         </div>
                       </div>

@@ -70,8 +70,8 @@ export default function Sidebar({ onSubscriptionClick }: SidebarProps) {
 
           const baseClassName = `interactive-element flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm font-medium transition-all relative ${
             isActive
-              ? 'bg-[#00d9ff]/20 text-[#00d9ff] border border-[#00d9ff]/30 backdrop-blur-sm'
-              : 'text-gray-300 hover:bg-white/5 hover:text-white backdrop-blur-sm'
+              ? 'bg-[#00d9ff]/20 text-[#00d9ff] border border-[#00d9ff]/30'
+              : 'text-gray-300 hover:bg-white/5 hover:text-white'
           }`;
 
           const emphasisClassName =

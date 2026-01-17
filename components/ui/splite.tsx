@@ -1,6 +1,7 @@
 'use client'
 
 import { Suspense, lazy, useState, useEffect, useRef } from 'react'
+import type { ReactEventHandler } from 'react'
 import { Loader2, AlertCircle, Maximize2, Minimize2, RotateCcw } from 'lucide-react'
 const Spline = lazy(() => import('@splinetool/react-spline'))
 
@@ -25,8 +26,38 @@ export function SplineScene({
   const [error, setError] = useState<Error | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isLoaded, setIsLoaded] = useState(false)
+  const [isIntersecting, setIsIntersecting] = useState(true)
+  const [isPageVisible, setIsPageVisible] = useState(true)
+  const [renderKey, setRenderKey] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const splineRef = useRef<any>(null)
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      setIsPageVisible(!document.hidden)
+    }
+
+    handleVisibility()
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
+
+  useEffect(() => {
+    const node = containerRef.current
+    if (!node) return
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setIsIntersecting(!!entry?.isIntersecting)
+      },
+      { threshold: 0.2 }
+    )
+
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  const isActive = isIntersecting && isPageVisible
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -44,7 +75,8 @@ export function SplineScene({
     onLoad?.()
   }
 
-  const handleError = (err: Error) => {
+  const handleError: ReactEventHandler<HTMLDivElement> = () => {
+    const err = new Error('Failed to load scene')
     setError(err)
     setIsLoading(false)
     onError?.(err)
@@ -70,6 +102,36 @@ export function SplineScene({
       splineRef.current.setZoom(1)
     }
   }
+
+  useEffect(() => {
+    if (!isActive) {
+      if (splineRef.current?.dispose) {
+        splineRef.current.dispose()
+      } else if (splineRef.current?.destroy) {
+        splineRef.current.destroy()
+      }
+      splineRef.current = null
+      setIsLoaded(false)
+      setIsLoading(false)
+      return
+    }
+
+    setError(null)
+    setIsLoading(true)
+    setIsLoaded(false)
+    setRenderKey((prev) => prev + 1)
+  }, [isActive])
+
+  useEffect(() => {
+    return () => {
+      if (splineRef.current?.dispose) {
+        splineRef.current.dispose()
+      } else if (splineRef.current?.destroy) {
+        splineRef.current.destroy()
+      }
+      splineRef.current = null
+    }
+  }, [])
 
   if (error) {
     return (
@@ -99,8 +161,8 @@ export function SplineScene({
       className={`relative w-full h-full min-h-[400px] rounded-2xl overflow-hidden bg-gradient-to-br from-black via-gray-900 to-black border border-white/10 ${className}`}
     >
       {/* Loading State */}
-      {isLoading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-10">
+      {isActive && isLoading && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10">
           <div className="relative">
             <div className="w-16 h-16 border-4 border-[#00d9ff]/20 border-t-[#00d9ff] rounded-full animate-spin" />
             <div className="absolute inset-0 flex items-center justify-center">
@@ -112,14 +174,17 @@ export function SplineScene({
       )}
 
       {/* Spline Scene */}
-      <Suspense fallback={null}>
-        <Spline
-          scene={scene}
-          onLoad={handleLoad}
-          onError={handleError}
-          className="w-full h-full"
-        />
-      </Suspense>
+      {isActive && (
+        <Suspense fallback={null}>
+          <Spline
+            key={renderKey}
+            scene={scene}
+            onLoad={handleLoad}
+            onError={handleError}
+            className="w-full h-full"
+          />
+        </Suspense>
+      )}
 
       {/* Controls Overlay */}
       {showControls && isLoaded && (
