@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
 import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
 import { upsertPersona } from '@/lib/persona-registry';
 
@@ -27,11 +26,6 @@ export async function POST(request: NextRequest) {
         { status: 500 }
       );
     }
-
-    // Initialize Replicate client
-    const replicate = new Replicate({
-      auth: apiToken.trim(),
-    });
 
     const { zipFile, triggerWord, imageCount, user, personaId } = await request.json();
 
@@ -91,19 +85,55 @@ export async function POST(request: NextRequest) {
       triggerWord,
       imageCount,
       visualStatus: 'training',
+      status: 'training',
       createdAt: new Date().toISOString(),
     });
 
     console.log(`Starting training with ${imageCount} images, trigger word: ${triggerWord}`);
 
-    // Use ostris/flux-dev-lora-trainer as specified by user
-    const trainingModelOptions = [
-      'ostris/flux-dev-lora-trainer', // Primary: User-specified model
-      'replicate/fast-flux-trainer:latest', // Fallback option
-      'lucataco/flux-dev-lora-trainer:latest', // Alternative fallback
-    ];
-    
-    let trainingModel = trainingModelOptions[0]; // Start with replicate/fast-flux-trainer
+    const trainingBaseModel = 'replicate/fast-flux-trainer';
+    const trainingVersion = process.env.REPLICATE_TRAINING_VERSION;
+    const trainingDestination = process.env.REPLICATE_TRAINING_MODEL;
+
+    if (!trainingVersion) {
+      return NextResponse.json(
+        {
+          error: 'Training model not configured',
+          details: 'Missing REPLICATE_TRAINING_VERSION. Set a valid model version id in .env.local.',
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!/^[0-9a-fA-F-]{36}$/.test(trainingVersion)) {
+      return NextResponse.json(
+        {
+          error: 'Invalid training model version',
+          details: 'REPLICATE_TRAINING_VERSION must be a Replicate version UUID.',
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!trainingDestination) {
+      return NextResponse.json(
+        {
+          error: 'Training destination not configured',
+          details: 'Missing REPLICATE_TRAINING_MODEL. Set it to "username/model-name".',
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!/^[^/]+\/[^/]+$/.test(trainingDestination)) {
+      return NextResponse.json(
+        {
+          error: 'Invalid training destination',
+          details: 'REPLICATE_TRAINING_MODEL must be in the format "username/model-name".',
+        },
+        { status: 400 }
+      );
+    }
     
     // Replicate's fast-flux-trainer accepts data URLs (data:application/zip;base64,...)
     // The ZIP file is already in base64 format from the frontend
@@ -116,18 +146,16 @@ export async function POST(request: NextRequest) {
       zipUrl = `data:application/zip;base64,${zipFile}`;
     }
     
+    console.log('Training base model:', trainingBaseModel);
+    console.log('Training version id:', trainingVersion);
+    console.log('Training destination:', trainingDestination);
     console.log('ZIP file format:', zipUrl.substring(0, 50) + '...');
     console.log('ZIP file size:', Math.round(zipUrl.length / 1024), 'KB (base64)');
     
-    // Prepare training input for fast-flux-trainer
-    // Common parameter names: input_images, input_images_zip, images_zip, training_images
     const trainingInput: any = {
       input_images: zipUrl, // ZIP file (data URL or URL)
       trigger_word: triggerWord, // Unique trigger word for this persona
-      steps: 1000, // Number of training steps
-      learning_rate: 1e-4, // Learning rate
-      batch_size: 1, // Batch size
-      resolution: 512, // Training resolution
+      lora_type: 'subject',
     };
     
     // Try alternative parameter names if the above doesn't work
@@ -136,112 +164,86 @@ export async function POST(request: NextRequest) {
     console.log('Training input prepared:', {
       imageCount: imageCount,
       triggerWord: trainingInput.trigger_word,
-      steps: trainingInput.steps,
       hasZip: !!zipUrl,
       zipType: zipUrl.substring(0, 20), // First 20 chars to see format
     });
 
-    // Start training with fast-flux-trainer
-    // Try replicate/fast-flux-trainer first, then fallback to alternatives if needed
-    // Try multiple parameter name variations as different model versions may use different names
-    let prediction;
-    let usedModel = trainingModel;
-    let usedParameters = 'input_images';
-    let lastError: any = null;
-    
-    // Try each model option
-    for (const modelOption of trainingModelOptions) {
-      try {
-        console.log(`Attempting to use model: ${modelOption}`);
-        trainingModel = modelOption;
-        
-        // Try primary parameter name first
-        try {
-          prediction = await replicate.predictions.create({
-            version: trainingModel,
-            input: trainingInput,
-          });
-          usedModel = trainingModel;
-          usedParameters = 'input_images';
-          console.log(`✓ Successfully started training with ${trainingModel} using input_images parameter`);
-          break;
-        } catch (paramError: any) {
-          console.log(`Parameter 'input_images' failed for ${trainingModel}, trying alternatives...`);
-          lastError = paramError;
-          
-          // Try alternative parameter names
-          const altInputs = [
-            { name: 'input_images_zip', input: { input_images_zip: zipUrl, trigger_word: triggerWord, steps: 1000, learning_rate: 1e-4, batch_size: 1, resolution: 512 } },
-            { name: 'images_zip', input: { images_zip: zipUrl, trigger_word: triggerWord, steps: 1000, learning_rate: 1e-4, batch_size: 1, resolution: 512 } },
-            { name: 'training_images', input: { training_images: zipUrl, trigger_word: triggerWord, steps: 1000, learning_rate: 1e-4, batch_size: 1, resolution: 512 } },
-          ];
-          
-          for (const alt of altInputs) {
-            try {
-              prediction = await replicate.predictions.create({
-                version: trainingModel,
-                input: alt.input,
-              });
-              usedModel = trainingModel;
-              usedParameters = alt.name;
-              console.log(`✓ Successfully started training with ${trainingModel} using ${alt.name} parameter`);
-              break;
-            } catch (altError: any) {
-              lastError = altError;
-              continue;
-            }
-          }
-          
-          if (prediction) break; // If we got a prediction, break out of model loop
-        }
-      } catch (modelError: any) {
-        console.log(`Model ${modelOption} failed:`, modelError.message);
-        lastError = modelError;
-        continue; // Try next model
-      }
+    const [owner, name] = trainingBaseModel.split('/');
+    if (!owner || !name) {
+      return NextResponse.json(
+        {
+          error: 'Invalid training model name',
+          details: 'REPLICATE_TRAINING_MODEL must be in the format "owner/name".',
+        },
+        { status: 400 }
+      );
     }
-    
-    // If all models failed, throw error
-    if (!prediction) {
-      throw new Error(`Failed to start training with any available model. Last error: ${lastError?.message || 'Unknown error'}`);
+
+    const trainingEndpoint = `https://api.replicate.com/v1/models/${owner}/${name}/versions/${trainingVersion}/trainings`;
+    let responsePayload: any = null;
+
+    const trainingResponse = await fetch(trainingEndpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${apiToken.trim()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        destination: trainingDestination,
+        input: trainingInput,
+      }),
+    });
+
+    const responseText = await trainingResponse.text();
+    try {
+      responsePayload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      responsePayload = responseText;
+    }
+
+    if (!trainingResponse.ok) {
+      console.error('Replicate training error:', {
+        model: trainingBaseModel,
+        version: trainingVersion,
+        destination: trainingDestination,
+        status: trainingResponse.status,
+        response: responsePayload,
+      });
+      return NextResponse.json(
+        {
+          error: 'Training could not be started',
+          details: 'The selected model version is invalid or does not support training.',
+        },
+        { status: 422 }
+      );
     }
 
     console.log('Training started successfully!');
-    console.log('Training ID:', prediction.id);
-    console.log('Status:', prediction.status);
-    console.log('Model used:', usedModel);
-    console.log('Parameters used:', usedParameters);
-    console.log('Initial output:', prediction.output);
+    console.log('Training ID:', responsePayload?.id);
+    console.log('Status:', responsePayload?.status);
+    console.log('Model used:', trainingBaseModel);
+    console.log('Parameters used:', 'input_images');
 
-    // Extract model ID from prediction output (if available immediately)
-    let modelId: string | null = null;
-    
-    if (prediction.output) {
-      if (typeof prediction.output === 'string') {
-        modelId = prediction.output;
-      } else if (Array.isArray(prediction.output) && prediction.output.length > 0) {
-        modelId = prediction.output[0];
-      } else if (typeof prediction.output === 'object' && prediction.output !== null) {
-        const output = prediction.output as any;
-        modelId = output.model_id || output.modelId || output.model || output.lora_url || null;
-      }
-    }
-    
-    // Model ID will typically be available after training completes
-    // We'll poll for it in the status endpoint
+    await upsertPersona({
+      personaId,
+      trainingId: responsePayload?.id,
+      status: 'training',
+      destinationModel: responsePayload?.destination,
+      visualStatus: 'training',
+    });
 
     return NextResponse.json({
-      trainingId: prediction.id,
-      status: prediction.status,
+      trainingId: responsePayload?.id,
+      status: responsePayload?.status,
       triggerWord: triggerWord,
-      modelId: modelId, // May be null initially, will be updated via status polling
       message: 'Training started successfully',
-      usedModel: usedModel, // Model that was successfully used
-      usedParameters: usedParameters, // Parameters that worked
     });
 
   } catch (error: any) {
-    console.error('Training error:', error);
+    console.error('Training error:', {
+      error: error?.message ?? error,
+      response: error?.response?.data ?? error,
+    });
     return NextResponse.json(
       { 
         error: error.message || 'Failed to start training',

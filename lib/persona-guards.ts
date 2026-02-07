@@ -1,6 +1,6 @@
 import type { User } from '@/lib/subscription';
 import { canUsePersona, canTrainVisualPersona, canTrainVoicePersona } from '@/lib/subscription';
-import { findPersonaById, type PersonaRecord, type PersonaStatus } from '@/lib/persona-registry';
+import { findPersonaById, readPersonas, type PersonaRecord, type PersonaStatus, type PersonaTrainingStatus } from '@/lib/persona-registry';
 
 type GuardFailure = { ok: false; status: number; body: { error: string; code: string } };
 type GuardSuccess = { ok: true; userId: string; persona?: PersonaRecord };
@@ -54,8 +54,9 @@ export async function requirePersonaAccess(options: {
   user?: User | null;
   personaId?: string;
   requireReady?: 'visual' | 'voice';
+  allowCrossUser?: boolean;
 }): Promise<GuardResult> {
-  const { user, personaId, requireReady } = options;
+  const { user, personaId, requireReady, allowCrossUser } = options;
   const userCheck = requireUserId(user);
   if (!userCheck.ok) return userCheck;
 
@@ -67,8 +68,28 @@ export async function requirePersonaAccess(options: {
     };
   }
 
-  const persona = await findPersonaById(personaId);
+  let persona = await findPersonaById(personaId);
+  let allPersonas: PersonaRecord[] | null = null;
   if (!persona) {
+    allPersonas = await readPersonas();
+    persona = allPersonas.find(record => (
+      record.modelId === personaId
+      || (record as any).model_id === personaId
+      || record.destinationModel === personaId
+      || record.trainingId === personaId
+    ));
+  }
+  if (!persona) {
+    const personas = allPersonas ?? await readPersonas();
+    const availableIds = personas.map(record => record.personaId);
+    const availableModelIds = personas
+      .map(record => record.modelId || (record as any).model_id || record.destinationModel || record.trainingId)
+      .filter(Boolean);
+    console.warn('Persona not found for id:', personaId, {
+      availablePersonaIds: availableIds.slice(0, 50),
+      availableModelIds: availableModelIds.slice(0, 50),
+      totalPersonas: personas.length,
+    });
     return {
       ok: false,
       status: 404,
@@ -76,7 +97,7 @@ export async function requirePersonaAccess(options: {
     };
   }
 
-  if (persona.userId !== userCheck.userId) {
+  if (!allowCrossUser && persona.userId !== userCheck.userId) {
     return {
       ok: false,
       status: 403,
@@ -85,14 +106,28 @@ export async function requirePersonaAccess(options: {
   }
 
   if (requireReady) {
-    const status: PersonaStatus | undefined =
-      requireReady === 'visual' ? persona.visualStatus : persona.voiceStatus;
-    if (status !== 'ready') {
-      return {
-        ok: false,
-        status: 409,
-        body: { error: 'Persona is not ready', code: 'PERSONA_NOT_READY' },
-      };
+    if (requireReady === 'visual') {
+      const trainingStatus: PersonaTrainingStatus | undefined = persona.status;
+      const fallbackVisual: PersonaStatus | undefined = persona.visualStatus;
+      const isActive = trainingStatus
+        ? trainingStatus === 'completed'
+        : fallbackVisual === 'ready';
+      if (!isActive) {
+        return {
+          ok: false,
+          status: 409,
+          body: { error: 'Persona is not ready', code: 'PERSONA_NOT_READY' },
+        };
+      }
+    } else {
+      const status: PersonaStatus | undefined = persona.voiceStatus;
+      if (status !== 'ready') {
+        return {
+          ok: false,
+          status: 409,
+          body: { error: 'Persona is not ready', code: 'PERSONA_NOT_READY' },
+        };
+      }
     }
   }
 

@@ -1,15 +1,25 @@
 import fs from 'fs/promises';
 import path from 'path';
 
+export type PersonaTrainingStatus = 'training' | 'completed' | 'failed';
 export type PersonaStatus = 'none' | 'training' | 'ready';
 
 export type PersonaRecord = {
   personaId: string;
   userId: string;
+  name?: string;
   triggerWord?: string;
   modelId?: string;
   trainingId?: string;
+  trainingZipUrl?: string;
+  trainingZipPath?: string;
+  imageUrl?: string;
+  status?: PersonaTrainingStatus;
+  weightsUrl?: string;
+  destinationModel?: string;
+  errorMessage?: string;
   createdAt?: string;
+  completedAt?: string;
   imageCount?: number;
   visualStatus?: PersonaStatus;
   voiceStatus?: PersonaStatus;
@@ -35,13 +45,27 @@ export async function readPersonas(): Promise<PersonaRecord[]> {
     if (error.code === 'ENOENT') {
       return [];
     }
+    if (error instanceof SyntaxError) {
+      const corruptPath = PERSONAS_DB_PATH.replace(
+        /\.json$/,
+        `.corrupt-${Date.now()}.json`
+      );
+      try {
+        await fs.rename(PERSONAS_DB_PATH, corruptPath);
+      } catch (renameError) {
+        console.error('Failed to move corrupt personas file:', renameError);
+      }
+      return [];
+    }
     throw error;
   }
 }
 
 export async function writePersonas(personas: PersonaRecord[]) {
   await ensureDataDir();
-  await fs.writeFile(PERSONAS_DB_PATH, JSON.stringify(personas, null, 2));
+  const tempPath = PERSONAS_DB_PATH.replace(/\.json$/, `.tmp-${Date.now()}.json`);
+  await fs.writeFile(tempPath, JSON.stringify(personas, null, 2));
+  await fs.rename(tempPath, PERSONAS_DB_PATH);
 }
 
 export async function findPersonaById(personaId: string): Promise<PersonaRecord | undefined> {

@@ -1,563 +1,942 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import Replicate from 'replicate';
-import { translate } from '@vitalets/google-translate-api';
-import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createWriteStream } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+import crypto from 'node:crypto';
+import { mixVideoWithDucking, processVideoWithAudio } from '@/lib/videoProcessor';
+import { generateLivePortraitVideo } from '@/lib/live-portrait';
+import { generateSpeech, generateSFX } from '@/lib/audio-service';
+import { getGeminiModelId } from '@/lib/gemini';
 
-/**
- * Helper function to extract retry_after duration from 429 error responses
- * Returns the retry_after value in milliseconds, or defaults to 5 seconds
- * Replicate API may return retry_after in headers, response body, or error object
- */
-function getRetryAfterDuration(error: any): number {
-  // Check for retry_after in error response headers
-  if (error.headers?.get?.('retry-after')) {
-    const retryAfter = parseInt(error.headers.get('retry-after'), 10);
-    if (!isNaN(retryAfter) && retryAfter > 0) {
-      return retryAfter * 1000; // Convert to milliseconds
+export const runtime = 'nodejs';
+
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN,
+});
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const parseRetryAfterMs = (error: any) => {
+  const headerValue =
+    error?.response?.headers?.get?.('retry-after')
+    || error?.headers?.get?.('retry-after')
+    || error?.response?.headers?.['retry-after']
+    || error?.response?.headers?.['Retry-After'];
+  if (headerValue) {
+    const seconds = Number(headerValue);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, Math.round(seconds * 1000));
     }
   }
-  
-  // Check for retry_after in error response object (direct property)
-  if (error.response?.headers?.get?.('retry-after')) {
-    const retryAfter = parseInt(error.response.headers.get('retry-after'), 10);
-    if (!isNaN(retryAfter) && retryAfter > 0) {
-      return retryAfter * 1000;
+  const message = String(error?.message || '');
+  const match = message.match(/retry_after[:\s]+(\d+)/i) || message.match(/retry after[:\s]+(\d+)/i);
+  if (match && match[1]) {
+    const seconds = Number(match[1]);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, Math.round(seconds * 1000));
     }
   }
-  
-  // Check for retry_after in error body
-  if (error.body?.retry_after) {
-    const retryAfter = parseInt(error.body.retry_after, 10);
-    if (!isNaN(retryAfter) && retryAfter > 0) {
-      return retryAfter * 1000;
+  return 10000;
+};
+
+const runReplicateWithRetry = async (model: string, input: Record<string, any>, maxAttempts = 5) => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await replicate.run(model, { input });
+    } catch (error: any) {
+      const status = error?.status || error?.response?.status;
+      const message = String(error?.message || '');
+      const isRateLimit = status === 429 || message.includes('429') || message.toLowerCase().includes('too many requests');
+      if (!isRateLimit || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = parseRetryAfterMs(error);
+      console.warn('Rate limit hit. Waiting to retry...', { attempt, delayMs });
+      await sleep(delayMs);
     }
   }
-  
-  // Check for retry_after in error data
-  if (error.data?.retry_after) {
-    const retryAfter = parseInt(error.data.retry_after, 10);
-    if (!isNaN(retryAfter) && retryAfter > 0) {
-      return retryAfter * 1000;
+  throw new Error('Replicate retry attempts exhausted.');
+};
+
+const isReadableStream = (value: any): value is ReadableStream => {
+  return value && typeof value.getReader === 'function';
+};
+
+const stripJsonFences = (raw: string) => {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('```')) {
+    return trimmed
+      .replace(/^```[a-zA-Z]*\n?/, '')
+      .replace(/```$/, '')
+      .trim();
+  }
+  return trimmed;
+};
+
+const extractGeminiJson = (raw: string) => {
+  const cleaned = stripJsonFences(raw);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      return JSON.parse(match[0]);
     }
   }
-  
-  // Check for retry_after in error message (sometimes included as text)
-  const retryAfterMatch = error.message?.match(/retry[_\s-]?after[:\s]+(\d+)/i);
-  if (retryAfterMatch) {
-    const retryAfter = parseInt(retryAfterMatch[1], 10);
-    if (!isNaN(retryAfter) && retryAfter > 0) {
-      return retryAfter * 1000;
+  return null;
+};
+
+const findFirstStream = (output: any): ReadableStream | null => {
+  if (!output) return null;
+  if (isReadableStream(output)) return output;
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      const found = findFirstStream(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof output === 'object') {
+    for (const value of Object.values(output)) {
+      const found = findFirstStream(value);
+      if (found) return found;
     }
   }
-  
-  // Default to 5 seconds if not specified
-  return 5000;
+  return null;
+};
+
+async function resolveReplicateFileUrl(apiUrl: string, token: string): Promise<string> {
+  if (!apiUrl.includes('api.replicate.com/v1/files/')) return apiUrl;
+  const fileResponse = await fetch(apiUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const fileText = await fileResponse.text();
+  if (!fileResponse.ok) {
+    throw new Error(`Replicate file lookup failed: ${fileResponse.status} ${fileText}`);
+  }
+  const filePayload = fileText ? JSON.parse(fileText) : null;
+  const fileSignedUrl = filePayload?.urls?.get || filePayload?.urls?.original;
+  const fileServingUrl = filePayload?.serving_url;
+  if (typeof fileServingUrl === 'string' && fileServingUrl.includes('://') && !fileServingUrl.includes('api.replicate.com/v1/files/')) {
+    return fileServingUrl;
+  }
+  if (typeof fileSignedUrl === 'string' && fileSignedUrl.includes('://') && !fileSignedUrl.includes('api.replicate.com/v1/files/')) {
+    return fileSignedUrl;
+  }
+  if (typeof fileServingUrl === 'string' && fileServingUrl.includes('://')) {
+    return fileServingUrl;
+  }
+  if (typeof fileSignedUrl === 'string' && fileSignedUrl.includes('://')) {
+    return fileSignedUrl;
+  }
+  throw new Error(`Replicate file lookup returned no signed URL. Payload: ${fileText}`);
 }
 
-/**
- * Translates text to English if it's not already in English
- * Ensures Replicate models receive English prompts for best results
- */
-async function translateToEnglish(text: string): Promise<string> {
-  try {
-    if (!text || text.trim().length === 0) {
-      return text;
-    }
-
-    const englishPattern = /^[a-zA-Z0-9\s.,!?'"()-]+$/;
-    const isAsciiOnly = englishPattern.test(text);
-    
-    const commonEnglishWords = [
-      'camera', 'lighting', 'transition', 'movement', 'cinematic', 'video', 'scene',
-      'character', 'action', 'mood', 'music', 'dramatic', 'smooth', 'pan', 'zoom'
-    ];
-    
-    const lowerText = text.toLowerCase();
-    const hasEnglishWords = commonEnglishWords.some(word => lowerText.includes(word));
-    
-    if (isAsciiOnly && hasEnglishWords) {
-      return text;
-    }
-    
-    if (!isAsciiOnly || !hasEnglishWords) {
-      console.log('Translating video prompt to English...');
-      const translationPromise = translate(text, { to: 'en' });
-      const timeoutPromise = new Promise<string>((_, reject) => 
-        setTimeout(() => reject(new Error('Translation timeout')), 5000)
-      );
-      
-      const result = await Promise.race([translationPromise, timeoutPromise]) as any;
-      return result.text || text;
-    }
-    
-    return text;
-  } catch (error: any) {
-    console.warn('Translation unavailable, using original text:', error.message);
-    return text;
+async function uploadStreamToReplicate(stream: ReadableStream, token: string): Promise<string> {
+  const response = new Response(stream);
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], { type: 'image/jpeg' });
+  const form = new FormData();
+  form.append('content', blob, 'persona.jpg');
+  const upload = await fetch('https://api.replicate.com/v1/files', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const text = await upload.text();
+  if (!upload.ok) {
+    throw new Error(`Replicate upload failed: ${upload.status} ${text}`);
   }
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  const servingUrl = payload?.serving_url;
+  const signedUrl = payload?.urls?.get || payload?.urls?.original;
+  const apiUrl = payload?.url;
+  const candidateUrl = typeof signedUrl === 'string' && signedUrl.includes('://')
+    ? signedUrl
+    : typeof servingUrl === 'string' && servingUrl.includes('://')
+      ? servingUrl
+      : typeof apiUrl === 'string' && apiUrl.includes('://')
+        ? apiUrl
+        : '';
+  if (candidateUrl) {
+    return await resolveReplicateFileUrl(candidateUrl, token);
+  }
+  throw new Error(`Replicate upload returned no URL. Payload: ${text}`);
 }
 
-export async function POST(request: NextRequest) {
+async function saveStreamToPublic(stream: ReadableStream, extension: string): Promise<string> {
+  const dir = path.join(process.cwd(), 'public', 'generated');
+  await mkdir(dir, { recursive: true });
+  const fileName = `${crypto.randomUUID()}.${extension}`;
+  const filePath = path.join(dir, fileName);
+  await pipeline(Readable.fromWeb(stream as any), createWriteStream(filePath));
+  return `/generated/${fileName}`;
+}
+
+function extractImageUrl(output: any): string {
+  if (!output) return '';
+
+  if (typeof output === 'string') {
+    return output.includes('://') ? output : '';
+  }
+
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      const found = extractImageUrl(item);
+      if (found) return found;
+    }
+    return '';
+  }
+
+  if (typeof output === 'object') {
+    for (const value of Object.values(output)) {
+      const found = extractImageUrl(value);
+      if (found) return found;
+    }
+  }
+
+  return '';
+}
+
+const normalizeReplicateAssetUrl = async (url: string) => {
+  const replicateFilePrefix = 'https://api.replicate.com/v1/files/';
+  if (url && url.includes('api.replicate.com/v1/files/')) {
+    let resolved = await resolveReplicateFileUrl(url, process.env.REPLICATE_API_TOKEN || '');
+    if (resolved.startsWith(replicateFilePrefix)) {
+      const fileId = resolved.slice(replicateFilePrefix.length);
+      resolved = `/api/replicate-file?id=${encodeURIComponent(fileId)}`;
+    }
+    return resolved;
+  }
+  return url;
+};
+
+const resolveReplicatePublicUrl = async (url: string) => {
+  if (!url) return url;
+  if (url.includes('api.replicate.com/v1/files/')) {
+    return await resolveReplicateFileUrl(url, process.env.REPLICATE_API_TOKEN || '');
+  }
+  return url;
+};
+
+const resolveBaseUrl = () => {
+  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return 'http://localhost:3000';
+};
+
+const ensureAbsoluteUrl = (url: string) => {
+  if (!url) return url;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) return `${resolveBaseUrl()}${url}`;
+  return url;
+};
+
+const uploadUrlToReplicate = async (url: string, filename: string, contentType: string) => {
+  const token = process.env.REPLICATE_API_TOKEN || '';
+  if (!token) {
+    throw new Error('REPLICATE_API_TOKEN not configured');
+  }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch asset for upload: ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], { type: contentType });
+  const form = new FormData();
+  form.append('content', blob, filename);
+  const upload = await fetch('https://api.replicate.com/v1/files', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const text = await upload.text();
+  if (!upload.ok) {
+    throw new Error(`Replicate upload failed: ${upload.status} ${text}`);
+  }
+  let payload: any = null;
   try {
-    // Get API token from environment
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-    
-    // Validate token exists
-    if (!apiToken || apiToken.trim() === '') {
-      console.error('REPLICATE_API_TOKEN not found in environment');
-      return NextResponse.json(
-        {
-          error: 'API token not configured',
-          details: 'Please set REPLICATE_API_TOKEN in your .env.local file and restart your dev server'
-        },
-        { status: 500 }
-      );
-    }
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  const servingUrl = payload?.serving_url;
+  const signedUrl = payload?.urls?.get || payload?.urls?.original;
+  const apiUrl = payload?.url;
+  const candidateUrl = typeof signedUrl === 'string' && signedUrl.includes('://')
+    ? signedUrl
+    : typeof servingUrl === 'string' && servingUrl.includes('://')
+      ? servingUrl
+      : typeof apiUrl === 'string' && apiUrl.includes('://')
+        ? apiUrl
+        : '';
+  if (!candidateUrl) {
+    throw new Error(`Replicate upload returned no URL. Payload: ${text}`);
+  }
+  return await resolveReplicatePublicUrl(candidateUrl);
+};
 
-    // Validate token format
-    if (!apiToken.startsWith('r8_')) {
-      console.error('Invalid API token format detected');
-      return NextResponse.json(
-        { error: 'Invalid API token format. Token must start with "r8_"' },
-        { status: 500 }
-      );
-    }
+const ensureReplicateUri = async (url: string, filename: string, contentType: string) => {
+  if (!url) return url;
+  const absolute = ensureAbsoluteUrl(url);
+  const isLocal = absolute.includes('localhost') || absolute.includes('127.0.0.1') || absolute.includes('0.0.0.0');
+  if (isLocal || absolute.startsWith('/')) {
+    return await uploadUrlToReplicate(absolute, filename, contentType);
+  }
+  return await resolveReplicatePublicUrl(absolute);
+};
 
-    // Initialize Replicate client with API token
-    // The SDK automatically handles Authorization header: Token ${apiToken}
-    const replicate = new Replicate({
-      auth: apiToken.trim(),
-    });
-    
-    console.log('Replicate client initialized with token:', apiToken.substring(0, 10) + '...');
+const generateSfxAudioUrl = async (prompt: string) => {
+  return await generateSFX({
+    text: prompt,
+    durationSeconds: 10,
+    promptInfluence: 0.5,
+  });
+};
 
-    // Parse and log request body
-    const requestBody = await request.json();
-    console.log('=== VIDEO API REQUEST ===');
-    console.log('Request Payload:', JSON.stringify(requestBody, null, 2));
+export async function POST(req: Request) {
+  console.log('🚀 STRICT PIPELINE STARTING...');
 
-    const { images, descriptions, narrative, prompt, triggerWord, isTextOnly, mode, user, personaMode, personaId } = requestBody;
+  try {
+    const body = await req.json();
+    console.log('🧪 REQUEST BODY:', body);
+    let {
+      userPrompt,
+      prompt,
+      personaModelId,
+      qualityTier,
+      personaTriggerWord,
+      dryRun,
+      referenceImageUrl,
+      personaImageUrl,
+      personaUrl,
+    } = body;
+    let dialogue =
+      typeof body?.dialogue === 'string'
+        ? body.dialogue
+        : typeof body?.script === 'string'
+          ? body.script
+          : typeof body?.voiceScript === 'string'
+            ? body.voiceScript
+            : '';
+    const voiceId = typeof body?.voiceId === 'string' ? body.voiceId : undefined;
+    const voiceFormat = body?.voiceFormat === 'wav' ? 'wav' : 'mp3';
 
-    const wantsPersona = personaMode === 'persona' || !!triggerWord;
-    if (wantsPersona) {
-      const premiumCheck = requirePremium(user);
-      if (!premiumCheck.ok) {
-        return NextResponse.json(premiumCheck.body, { status: premiumCheck.status });
-      }
+    const resolvedPersonaModelId =
+      personaModelId
+      || body?.modelId
+      || body?.model_id
+      || body?.persona?.modelId
+      || body?.persona?.model_id
+      || body?.persona?.modelId;
 
-      const personaCheck = await requirePersonaAccess({
-        user,
-        personaId,
-        requireReady: 'visual',
-      });
-      if (!personaCheck.ok) {
-        return NextResponse.json(personaCheck.body, { status: personaCheck.status });
-      }
-    }
+    const resolvedTriggerWord =
+      personaTriggerWord
+      || body?.triggerWord
+      || body?.trigger_word
+      || body?.persona?.triggerWord
+      || body?.persona?.trigger_word;
 
-    // Determine generation mode
-    const isMultiImageMode = images && Array.isArray(images) && images.length > 0;
-    const isTextToVideoMode = isTextOnly === true || (!isMultiImageMode && (!images || images.length === 0));
+    const safePrompt = userPrompt || prompt || 'cinematic shot of a person moving';
+    const normalizePrompt = (text: string, trigger?: string) => {
+      if (!trigger) return text.trim();
+      const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const stripRegex = new RegExp(`\\b${escaped}\\b`, 'gi');
+      const cleaned = text.replace(stripRegex, '').replace(/^[,\s]+|[,\s]+$/g, '').trim();
+      return cleaned;
+    };
+    const normalizedPrompt = normalizePrompt(safePrompt, resolvedTriggerWord);
+    const personaActive = Boolean(resolvedPersonaModelId || resolvedTriggerWord);
+    const personaName =
+      body?.persona?.name
+      || body?.personaName
+      || body?.persona?.title
+      || '';
+    const personaPrefix = [resolvedTriggerWord, personaName]
+      .filter((part, index, list) => part && list.indexOf(part) === index)
+      .join(' ')
+      .trim();
+    const highQualityPrefix = 'photorealistic, cinematic film still, highly detailed, sharp focus, dramatic lighting,';
+    let imagePrompt = safePrompt;
+    let videoPrompt = safePrompt;
+    let usedGeminiImagePrompt = false;
+    let usedGeminiVideoPrompt = false;
+    let audioContentType: 'speech' | 'sfx' | '' = '';
+    let audioTextContent = '';
+    let audioScript = '';
+    let sfxPromptText = '';
+    let avatarPerformance = '';
+    let voiceEmotion = '';
+    let voiceEmotionSettings: { stability?: number; similarity_boost?: number; style?: number } | undefined;
+    let audioDrivenSource = false;
 
-    if (!prompt || !prompt.trim()) {
-      console.error('Missing prompt in request');
-      return NextResponse.json(
-        { error: 'Video prompt is required' },
-        { status: 400 }
-      );
-    }
-
-    console.log('=== VIDEO GENERATION PARAMETERS ===');
-    console.log('Prompt:', prompt);
-    console.log('Is Text Only:', isTextOnly);
-    console.log('Mode:', mode);
-    console.log('Has Images:', images && images.length > 0);
-    console.log('Image Count:', images?.length || 0);
-    console.log('Trigger Word:', triggerWord || 'None');
-
-    // Translate prompt to English for better AI interpretation
-    let translatedPrompt = prompt;
-    console.log('Original prompt (any language):', translatedPrompt);
-    translatedPrompt = await translateToEnglish(translatedPrompt);
-    console.log('Translated prompt (English):', translatedPrompt);
-
-    console.log('Starting video generation...');
-    console.log('Mode:', isTextToVideoMode ? 'Text-to-Video' : isMultiImageMode ? `Multi-image (${images.length} images)` : 'Image-to-Video');
-    console.log('Final prompt:', translatedPrompt);
-    console.log('Trigger word:', triggerWord);
-    if (isMultiImageMode) {
-      console.log('Image descriptions:', descriptions);
-      console.log('Narrative:', narrative);
-    }
-
-    let videoPrediction;
-
-    if (isTextToVideoMode) {
-      // TEXT-TO-VIDEO MODE: Generate video purely from text prompt
-      console.log('TEXT-TO-VIDEO MODE: Generating video from text prompt only');
-      
-      // TEXT-TO-VIDEO MODE: Use official video model slugs (no version hashes)
-      // Using model slug format for stability
-      const textToVideoModels = [
-        'minimax/video-01', // Primary: Video model
-        'lucataco/luma-dream-machine', // Secondary: Official Luma model
-        'kling-ai/kling-v1', // Tertiary: Official Kling model
-      ];
-      
-      let lastError: any = null;
-      
-      for (const modelOption of textToVideoModels) {
-        try {
-          console.log(`Attempting text-to-video with model: ${modelOption}`);
-          
-          // Build input parameters - all video models use prompt field
-          const videoInput: any = {
-            prompt: translatedPrompt, // Send prompt to video model's prompt field
-          };
-          
-          // Add model-specific parameters if needed
-          if (modelOption.includes('minimax/video-01')) {
-            // Minimax video-01 uses prompt field
-            videoInput.prompt = translatedPrompt;
-          } else if (modelOption.includes('luma-dream-machine')) {
-            // Luma Dream Machine uses prompt field
-            videoInput.prompt = translatedPrompt;
-          } else if (modelOption.includes('kling')) {
-            // Kling uses prompt field
-            videoInput.prompt = translatedPrompt;
+    let model: ReturnType<typeof genAI.getGenerativeModel> | null = null;
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const preferredModel = 'gemini-3-pro-preview';
+        const resolvedModel = await getGeminiModelId(process.env.GEMINI_API_KEY, preferredModel);
+        model = genAI.getGenerativeModel({
+          model: resolvedModel,
+          generationConfig: { temperature: 0.7 },
+        });
+        const structuredResult = await model.generateContent(`
+You are an expert Video & Sound Director. Classify the user's request by intent:
+- Mode CHAOS (absurd/comedy, memes, chaotic actions).
+- Mode COMMERCIAL only if the user explicitly signals ad intent (keywords like "reklam", "tanıtım", "lansman", "satış", "sponsorlu", "commercial style", "product showcase").
+- Otherwise use CINEMATIC/STORY mode: objects are props; focus on character emotion and atmosphere.
+Return ONLY valid JSON with this shape:
+{
+  "visual_prompt": "Flux-2-max prompt with technical cinematography details.",
+  "audio_script": "Character speech text.",
+  "voice_emotion": "ElevenLabs voice emotion description (e.g., 'intense whisper').",
+  "sfx_prompt": "AudioLDM-2 ambience prompt.",
+  "avatar_performance": "Kling avatar performance notes (micro-acting cues)."
+}
+Rules:
+- Visual (Flux-2-max): use lens (85mm/35mm), film stock (Kodak Portra 400), lighting (Rembrandt, chiaroscuro, volumetric fog), texture (skin pores, fabric texture), atmospheric depth (dust, rain reflections, neon glow). Aim for Netflix 4K HDR look.
+- Avatar performance (Kling): describe motion only (head turns, gaze shifts, steps, micro gestures). Keep it short and precise.
+- Speech: include micro‑nuance (breathiness, through teeth, soft smile). Use pauses (...) and [emphasis] tags.
+- SFX: Dynamic Acoustic Simulation (Physics + Space + Intensity + Mood + TIME).
+  - Construct: [Specific action sounds] + [Environmental ambience/reverb] + [Matching musical mood].
+  - Temporal Evolution: sudden, gradual build-up, fading in, abrupt stop, swells, intermittent.
+  - Material Precision: leather creaks, heavy boots, metallic clank, liquid on concrete.
+  - Mix Balance: action sounds foreground, music background (underscore). Duck music during impacts.
+  - No artist names. No speaking/gibberish/vocals/singing. No cartoon boings unless comedy is explicit.
+  - Always end SFX prompt with: "high fidelity, cinematic mix, stereo imaging, no vocals".
+- If persona is active, the visual prompt must start with: "${personaPrefix || resolvedTriggerWord || 'TOK'}"
+- Mandatory Facial Visibility: correct away‑facing actions with head turn or 3/4 profile; key light on face; sharp focus on eyes; no back-of-head unless user says "ONLY BACK VIEW".
+- Output must be English.
+User intent: "${normalizedPrompt}"
+`);
+        const raw = structuredResult.response.text().trim();
+        const parsed = extractGeminiJson(raw);
+        if (parsed && typeof parsed === 'object') {
+          const visual = String((parsed as any).visual_prompt ?? '').trim();
+          const videoAction = String((parsed as any).video_action_prompt ?? '').trim();
+          const audioText = String((parsed as any).audio_text ?? '').trim();
+          const audioScriptText = String((parsed as any).audio_script ?? '').trim();
+          const sfxPrompt = String((parsed as any).sfx_prompt ?? '').trim();
+          const avatarPerf = String((parsed as any).avatar_performance ?? '').trim();
+          const voiceEmotionText = String((parsed as any).voice_emotion ?? '').trim();
+          const emotionSettings = (parsed as any).voice_emotion_settings;
+          audioDrivenSource = Boolean(
+            Object.prototype.hasOwnProperty.call(parsed, 'audio_script')
+              || Object.prototype.hasOwnProperty.call(parsed, 'avatar_performance')
+              || Object.prototype.hasOwnProperty.call(parsed, 'voice_emotion')
+          );
+          if (visual) {
+            usedGeminiImagePrompt = true;
+            usedGeminiVideoPrompt = true;
+            imagePrompt = visual;
+            videoPrompt = videoAction ? `${visual}. ${videoAction}` : visual;
           }
-          
-          console.log(`Attempting text-to-video with model: ${modelOption}`);
-          console.log('Input parameters:', JSON.stringify(videoInput, null, 2));
-          console.log('Using model identifier format: owner/model-name');
-          
-          // Retry logic for 429 errors
-          let retryCount = 0;
-          let predictionSuccess = false;
-          
-          while (retryCount <= 1 && !predictionSuccess) {
-            try {
-              // Use model name directly in version field (Replicate SDK accepts this)
-              videoPrediction = await replicate.predictions.create({
-                version: modelOption, // Format: owner/model-name (e.g., lucataco/luma-dream-machine)
-                input: videoInput,
-              });
-              
-              predictionSuccess = true;
-              console.log(`✓ Successfully started text-to-video with ${modelOption}`);
-              console.log('Prediction ID:', videoPrediction.id);
-              console.log('Prediction Status:', videoPrediction.status);
-              break;
-            } catch (createError: any) {
-              // Check if it's a 429 error
-              if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
-                const retryAfter = getRetryAfterDuration(createError);
-                console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
-                await new Promise(resolve => setTimeout(resolve, retryAfter));
-                retryCount++;
-                continue;
-              }
-              // If not 429 or we've already retried, throw the error
-              throw createError;
-            }
-          }
-          
-          if (predictionSuccess) {
-            break;
-          }
-        } catch (modelError: any) {
-          console.error(`Model ${modelOption} failed:`, modelError.message);
-          console.error('Error details:', modelError);
-          lastError = modelError;
-          
-          // Try with minimal parameters (just prompt) - with retry logic
-          try {
-            console.log(`Retrying ${modelOption} with minimal parameters...`);
-            const altInput: any = {
-              prompt: translatedPrompt,
+          audioScript = audioScriptText || audioText;
+          sfxPromptText = sfxPrompt;
+          avatarPerformance = avatarPerf || videoAction;
+          voiceEmotion = voiceEmotionText || String(emotionSettings?.description ?? '').trim();
+          if (emotionSettings && typeof emotionSettings === 'object') {
+            const stability = Number(emotionSettings?.stability);
+            const similarityBoost = Number(emotionSettings?.similarity_boost);
+            const style = Number(emotionSettings?.style);
+            voiceEmotionSettings = {
+              ...(Number.isFinite(stability) ? { stability } : {}),
+              ...(Number.isFinite(similarityBoost) ? { similarity_boost: similarityBoost } : {}),
+              ...(Number.isFinite(style) ? { style } : {}),
             };
-            
-            let retryCount = 0;
-            let predictionSuccess = false;
-            
-            while (retryCount <= 1 && !predictionSuccess) {
-              try {
-                videoPrediction = await replicate.predictions.create({
-                  version: modelOption,
-                  input: altInput,
-                });
-                predictionSuccess = true;
-                console.log(`✓ Successfully started text-to-video with ${modelOption} (minimal params)`);
-                console.log('Prediction ID:', videoPrediction.id);
-                break;
-              } catch (createError: any) {
-                // Check if it's a 429 error
-                if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
-                  const retryAfter = getRetryAfterDuration(createError);
-                  console.log(`429 error from Replicate (minimal params), waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
-                  await new Promise(resolve => setTimeout(resolve, retryAfter));
-                  retryCount++;
-                  continue;
-                }
-                throw createError;
-              }
-            }
-            
-            if (predictionSuccess) {
-              break;
-            }
-          } catch (altError: any) {
-            console.error(`Alt params also failed for ${modelOption}:`, altError.message);
-            console.error('Alt error details:', altError);
-            continue;
+          }
+          if (audioScript) {
+            audioContentType = 'speech';
+            audioTextContent = audioScript;
+          } else if (sfxPromptText) {
+            audioContentType = 'sfx';
+            audioTextContent = sfxPromptText;
+          } else {
+            audioContentType = '';
+            audioTextContent = '';
           }
         }
+      } catch (error) {
+        console.warn('Gemini prompt enhancement failed, using raw prompt.');
       }
-      
-      if (!videoPrediction) {
-        // All text-to-video models failed
-        throw new Error('All text-to-video models failed. Please try again or check your prompt.');
-      }
-      
-    } else if (isMultiImageMode) {
-      // MULTI-IMAGE MODE: Generate video sequence from multiple images
-      console.log(`Processing ${images.length} images for video sequence...`);
-
-        // Use video model for image-to-video conversion
-      const videoModel = 'minimax/video-01'; // Use video model (slug format, no version hash)
-      
-      // Strategy: Use the first image as the starting frame
-      // The prompt describes the full sequence including image references
-      const firstImage = images[0];
-      // Prompt is already translated above
-
-      console.log('Using first image as starting frame, generating video sequence...');
-      console.log('Full narrative prompt:', translatedPrompt);
-
-      // Build video input with first image and narrative prompt
-      const videoInput: any = {
-        image: firstImage, // First image as starting frame
-        motion_bucket_id: 127, // Motion intensity
-        cond_aug: 0.02,
-        decoding_t: 14,
-        num_frames: Math.max(25, images.length * 10), // More frames for longer sequences
-      };
-
-      console.log('Multi-image video input:', JSON.stringify({
-        ...videoInput,
-        image: '[BASE64_IMAGE_DATA]', // Don't log full base64
-      }, null, 2));
-
-      // Retry logic for 429 errors
-      let multiImageRetryCount = 0;
-      let multiImagePredictionSuccess = false;
-      
-      while (multiImageRetryCount <= 1 && !multiImagePredictionSuccess) {
-        try {
-          videoPrediction = await replicate.predictions.create({
-            version: videoModel,
-            input: videoInput,
-          });
-          multiImagePredictionSuccess = true;
-          console.log('Multi-image prediction created:', videoPrediction.id);
-        } catch (createError: any) {
-          // Check if it's a 429 error
-          if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && multiImageRetryCount < 1) {
-            const retryAfter = getRetryAfterDuration(createError);
-            console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${multiImageRetryCount + 1}...`);
-            await new Promise(resolve => setTimeout(resolve, retryAfter));
-            multiImageRetryCount++;
-            continue;
-          }
-          throw createError;
-        }
-      }
-
-      console.log('Multi-image video generation started with first frame');
-      
+    }
+    if (audioContentType === 'speech') {
+      dialogue = audioTextContent;
+    } else if (audioContentType === 'sfx') {
+      dialogue = audioTextContent;
     } else {
-      // SINGLE-IMAGE MODE: Use uploaded image or generate video directly from text prompt
-      // If no image uploaded, use text-to-video models directly
-      let videoInputImage: string | null = null;
-
-      // If we have an uploaded image, use it for image-to-video
-      if (images && images.length > 0) {
-        videoInputImage = images[0];
-        console.log('Using uploaded image for video generation');
-        
-        // Use image-to-video model
-        const videoModel = 'minimax/video-01'; // Use video model (slug format, no version hash)
-        
-        const videoInput: any = {
-          image: videoInputImage,
-        };
-        
-        // Add optional parameters if model supports them
-        // Some models may not support all parameters
-        console.log('Single-image video input with image URL');
-        console.log('Using model:', videoModel);
-        
-        // Retry logic for 429 errors
-        let singleVideoRetryCount = 0;
-        let singleVideoPredictionSuccess = false;
-        
-        while (singleVideoRetryCount <= 1 && !singleVideoPredictionSuccess) {
-          try {
-            videoPrediction = await replicate.predictions.create({
-              version: videoModel,
-              input: videoInput,
-            });
-            singleVideoPredictionSuccess = true;
-            console.log('Single-image prediction created:', videoPrediction.id);
-            break;
-          } catch (createError: any) {
-            // Check if it's a 429 error
-            if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && singleVideoRetryCount < 1) {
-              const retryAfter = getRetryAfterDuration(createError);
-              console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${singleVideoRetryCount + 1}...`);
-              await new Promise(resolve => setTimeout(resolve, retryAfter));
-              singleVideoRetryCount++;
-              continue;
-            }
-            throw createError;
-          }
-        }
-      } else {
-        // No image uploaded - use text-to-video models directly
-        // This handles persona/trigger word scenarios
-        console.log('No image uploaded, using text-to-video models directly');
-        console.log('Prompt includes trigger word:', triggerWord || 'None');
-        
-        // Use the same text-to-video models as text-only mode
-        const textToVideoModels = [
-          'minimax/video-01', // Primary: Video model
-          'lucataco/luma-dream-machine', // Secondary: Official Luma model
-          'kling-ai/kling-v1', // Tertiary: Official Kling model
-        ];
-        
-        let lastError: any = null;
-        
-        for (const modelOption of textToVideoModels) {
-          try {
-            console.log(`Attempting text-to-video with model: ${modelOption}`);
-            
-            const videoInput: any = {
-              prompt: translatedPrompt, // Prompt already includes trigger word if provided
-            };
-            
-            console.log('Input parameters:', JSON.stringify(videoInput, null, 2));
-            
-            // Retry logic for 429 errors
-            let retryCount = 0;
-            let predictionSuccess = false;
-            
-            while (retryCount <= 1 && !predictionSuccess) {
-              try {
-                videoPrediction = await replicate.predictions.create({
-                  version: modelOption,
-                  input: videoInput,
-                });
-                
-                predictionSuccess = true;
-                console.log(`✓ Successfully started text-to-video with ${modelOption}`);
-                console.log('Prediction ID:', videoPrediction.id);
-                break;
-              } catch (createError: any) {
-                // Check if it's a 429 error
-                if ((createError.status === 429 || createError.message?.includes('429') || createError.message?.includes('rate limit')) && retryCount < 1) {
-                  const retryAfter = getRetryAfterDuration(createError);
-                  console.log(`429 error from Replicate, waiting ${retryAfter / 1000} seconds before retry ${retryCount + 1}...`);
-                  await new Promise(resolve => setTimeout(resolve, retryAfter));
-                  retryCount++;
-                  continue;
-                }
-                throw createError;
-              }
-            }
-            
-            if (predictionSuccess) {
-              break;
-            }
-          } catch (modelError: any) {
-            console.error(`Model ${modelOption} failed:`, modelError.message);
-            lastError = modelError;
-            continue;
-          }
-        }
-        
-        if (!videoPrediction) {
-          throw new Error('All text-to-video models failed. Please try again or check your prompt.');
+      dialogue = '';
+    }
+    if (audioContentType === 'speech' && !dialogue.trim()) {
+      audioContentType = '';
+    }
+    if (audioContentType === 'sfx' && !dialogue.trim()) {
+      audioContentType = '';
+    }
+    if (!audioContentType && dialogue.trim()) {
+      audioContentType = 'speech';
+    }
+    if (personaPrefix) {
+      const prefixLower = personaPrefix.toLowerCase();
+      if (!imagePrompt.toLowerCase().startsWith(prefixLower)) {
+        imagePrompt = `${personaPrefix} ${imagePrompt}`.trim();
+      }
+      if (!videoPrompt.toLowerCase().startsWith(prefixLower)) {
+        videoPrompt = `${personaPrefix} ${videoPrompt}`.trim();
+      }
+    }
+    if (!usedGeminiImagePrompt || imagePrompt.trim().toLowerCase() === normalizedPrompt.trim().toLowerCase()) {
+      const basePrefix = personaPrefix || resolvedTriggerWord || '';
+      imagePrompt = `${basePrefix ? `${basePrefix} ` : ''}${normalizedPrompt}, cinematic lighting, shallow depth of field, photorealistic textures`.trim();
+    }
+    if (!usedGeminiVideoPrompt || videoPrompt.trim().toLowerCase() === imagePrompt.trim().toLowerCase()) {
+      videoPrompt = `${imagePrompt}. Smooth tracking shot, dramatic lighting, realistic movement.`;
+    }
+    if (resolvedTriggerWord) {
+      const triggerLower = resolvedTriggerWord.toLowerCase();
+      if (!imagePrompt.toLowerCase().includes(triggerLower)) {
+        imagePrompt = `${resolvedTriggerWord} ${imagePrompt}`.trim();
+      }
+      if (!videoPrompt.toLowerCase().includes(triggerLower)) {
+        videoPrompt = `${resolvedTriggerWord} ${videoPrompt}`.trim();
+      }
+    }
+    if (model) {
+      const hasTurkishImage = /[ğüşöçıİ]/i.test(imagePrompt) || /\b(yolda|yuruyor|yürüyor|sokakta|adam|kadin|kadın)\b/i.test(imagePrompt);
+      if (hasTurkishImage) {
+        const translateResult = await model.generateContent(`
+Translate this prompt to clean, cinematic English. Output ONLY the English prompt.
+Prompt: "${imagePrompt}"
+`);
+        const translated = translateResult.response.text().trim();
+        if (translated) {
+          imagePrompt = translated;
         }
       }
-
+      const hasTurkishVideo = /[ğüşöçıİ]/i.test(videoPrompt) || /\b(yolda|yuruyor|yürüyor|sokakta|adam|kadin|kadın)\b/i.test(videoPrompt);
+      if (hasTurkishVideo) {
+        const translateVideoResult = await model.generateContent(`
+Translate this prompt to clean, cinematic English. Output ONLY the English prompt.
+Prompt: "${videoPrompt}"
+`);
+        const translatedVideo = translateVideoResult.response.text().trim();
+        if (translatedVideo) {
+          videoPrompt = translatedVideo;
+        }
+      }
     }
 
-    if (!videoPrediction) {
-      throw new Error('Failed to create video prediction after all retries');
+    if (resolvedTriggerWord) {
+      const triggerLower = resolvedTriggerWord.toLowerCase();
+      if (!imagePrompt.toLowerCase().includes(triggerLower)) {
+        imagePrompt = `${resolvedTriggerWord} ${imagePrompt}`.trim();
+      }
+      if (!videoPrompt.toLowerCase().includes(triggerLower)) {
+        videoPrompt = `${resolvedTriggerWord} ${videoPrompt}`.trim();
+      }
     }
 
-    console.log('=== VIDEO GENERATION SUCCESS ===');
-    console.log('Video generation started, ID:', videoPrediction.id);
-    console.log('Status:', videoPrediction.status);
-    console.log('Mode:', isTextToVideoMode ? 'Text-to-Video' : isMultiImageMode ? 'Multi-Image' : 'Image-to-Video');
-    console.log('Full prediction object:', JSON.stringify(videoPrediction, null, 2));
+    const shouldDryRun = dryRun === true || dryRun === 'true' || dryRun === 1 || dryRun === '1';
+    console.log('🧪 DRY RUN:', shouldDryRun, 'raw:', dryRun);
 
-    const responseData = {
-      videoId: videoPrediction.id,
-      status: videoPrediction.status,
-      message: 'Video generation started successfully',
-      isMultiImageMode: isMultiImageMode,
-      isTextToVideo: isTextToVideoMode,
-      imageCount: isMultiImageMode ? images.length : 0,
+    if (shouldDryRun) {
+      return NextResponse.json({
+        success: true,
+        dryRun: true,
+        imagePrompt,
+        videoPrompt,
+        usedGeminiImagePrompt,
+        usedGeminiVideoPrompt,
+        audioCategory: audioContentType,
+        audioText: audioTextContent,
+        audioScript,
+        sfxPrompt: sfxPromptText,
+        avatarPerformance,
+        voiceEmotion,
+        voiceEmotionSettings,
+      });
+    }
+
+    const restoreFace = async (inputUrl: string) => {
+      try {
+        console.log('🧼 RESTORING FACE (GFPGAN)...');
+        const restoreOutput = await runReplicateWithRetry('tencentarc/gfpgan', {
+          image: inputUrl,
+          upscale: 2,
+        });
+        let restoredUrl = extractImageUrl(restoreOutput);
+        if (!restoredUrl) {
+          const stream = findFirstStream(restoreOutput);
+          if (stream) {
+            try {
+              console.log('🧪 RESTORE STREAM OUTPUT: uploading to Replicate files...');
+              restoredUrl = await uploadStreamToReplicate(stream, process.env.REPLICATE_API_TOKEN || '');
+              console.log('✅ RESTORE STREAM URL:', restoredUrl);
+            } catch (error) {
+              console.error('❌ RESTORE STREAM UPLOAD FAILED:', error);
+            }
+          }
+        }
+        if (restoredUrl && typeof restoredUrl === 'string') {
+          console.log('✅ FACE RESTORATION APPLIED:', restoredUrl);
+          return restoredUrl;
+        }
+        throw new Error('GFPGAN returned no output');
+      } catch (error) {
+        console.warn('⚠️ GFPGAN RESTORE FAILED, TRYING CODEFORMER...', error);
+      }
+
+      try {
+        console.log('🧼 RESTORING FACE (CodeFormer)...');
+        const restoreOutput = await runReplicateWithRetry('sczhou/codeformer', {
+          image: inputUrl,
+          upscale: 2,
+          fidelity: 0.5,
+          face_upsample: true,
+        });
+        let restoredUrl = extractImageUrl(restoreOutput);
+        if (!restoredUrl) {
+          const stream = findFirstStream(restoreOutput);
+          if (stream) {
+            try {
+              console.log('🧪 RESTORE STREAM OUTPUT: uploading to Replicate files...');
+              restoredUrl = await uploadStreamToReplicate(stream, process.env.REPLICATE_API_TOKEN || '');
+              console.log('✅ RESTORE STREAM URL:', restoredUrl);
+            } catch (error) {
+              console.error('❌ RESTORE STREAM UPLOAD FAILED:', error);
+            }
+          }
+        }
+        if (restoredUrl && typeof restoredUrl === 'string') {
+          console.log('✅ FACE RESTORATION APPLIED:', restoredUrl);
+          return restoredUrl;
+        }
+        console.warn('⚠️ CODEFORMER RESTORE FAILED, USING ORIGINAL IMAGE.');
+      } catch (error) {
+        console.warn('⚠️ CODEFORMER RESTORE ERROR, USING ORIGINAL IMAGE.', error);
+      }
+
+      return inputUrl;
+    };
+    const buildReferenceImage = async () => {
+      const referenceImage =
+        body?.sourceImage
+        || personaImageUrl
+        || personaUrl
+        || referenceImageUrl
+        || body?.reference_image_url
+        || body?.referenceImage;
+      let cleanImageUrl = '';
+
+      if (resolvedPersonaModelId) {
+        let targetModelVersion = resolvedPersonaModelId;
+        if (resolvedPersonaModelId && !resolvedPersonaModelId.includes('/') && !resolvedPersonaModelId.includes(':')) {
+          try {
+            const training = await replicate.trainings.get(resolvedPersonaModelId);
+            if (training.output?.version) targetModelVersion = training.output.version;
+            else if (training.version) targetModelVersion = training.version;
+          } catch {
+            console.warn('ID resolve skipped');
+          }
+        }
+
+        console.log('📸 GENERATING PERSONA REFERENCE IMAGE...');
+        const personaVisibilityPrefix = 'distinct facial features visible, recognizable identity, cinematic shot revealing the face,';
+        const personaPrompt = `${resolvedTriggerWord || 'TOK'}, ${personaVisibilityPrefix} ${highQualityPrefix} ${imagePrompt}`.trim();
+        const personaImagePayload = {
+          prompt: personaPrompt,
+          num_outputs: 1,
+          num_inference_steps: 50,
+          guidance_scale: 3.5,
+          output_quality: 100,
+          aspect_ratio: '16:9',
+          output_format: 'jpg',
+          lora_scale: 1.0,
+          disable_safety_checker: true,
+        };
+
+        const imageOutput = await runReplicateWithRetry(targetModelVersion, personaImagePayload);
+
+        cleanImageUrl = extractImageUrl(imageOutput);
+        if (!cleanImageUrl) {
+          const stream = findFirstStream(imageOutput);
+          if (stream) {
+            try {
+              console.log('🧪 STREAM OUTPUT DETECTED: uploading to Replicate files...');
+              cleanImageUrl = await uploadStreamToReplicate(stream, process.env.REPLICATE_API_TOKEN || '');
+              console.log('✅ STREAM UPLOAD URL:', cleanImageUrl);
+            } catch (error) {
+              console.error('❌ STREAM UPLOAD FAILED:', error);
+            }
+          }
+        }
+
+        if (!cleanImageUrl || typeof cleanImageUrl !== 'string') {
+          console.error('❌ INVALID IMAGE OUTPUT:', imageOutput);
+          throw new Error('Critical: Persona reference image generation failed.');
+        }
+
+        console.log('✅ VALID PERSONA IMAGE URL EXTRACTED:', cleanImageUrl);
+        cleanImageUrl = await restoreFace(cleanImageUrl);
+      } else if (referenceImage) {
+        cleanImageUrl = referenceImage;
+        console.log('✅ USING PROVIDED REFERENCE IMAGE:', cleanImageUrl);
+      } else {
+        console.log('📸 GENERATING REFERENCE IMAGE (Flux 2 Max)...');
+        const imagePayload = {
+          prompt: `${highQualityPrefix} ${imagePrompt}`.trim(),
+          aspect_ratio: '16:9',
+          output_quality: 100,
+          output_format: 'jpg',
+          num_inference_steps: 50,
+        };
+
+        const imageOutput = await runReplicateWithRetry('black-forest-labs/flux-2-max', imagePayload);
+
+        cleanImageUrl = extractImageUrl(imageOutput);
+        if (!cleanImageUrl) {
+          const stream = findFirstStream(imageOutput);
+          if (stream) {
+            try {
+              console.log('🧪 STREAM OUTPUT DETECTED: uploading to Replicate files...');
+              cleanImageUrl = await uploadStreamToReplicate(stream, process.env.REPLICATE_API_TOKEN || '');
+              console.log('✅ STREAM UPLOAD URL:', cleanImageUrl);
+            } catch (error) {
+              console.error('❌ STREAM UPLOAD FAILED:', error);
+            }
+          }
+        }
+
+        if (!cleanImageUrl || typeof cleanImageUrl !== 'string') {
+          console.error('❌ INVALID IMAGE OUTPUT:', imageOutput);
+          throw new Error('Critical: Reference image generation failed.');
+        }
+
+        console.log('✅ VALID IMAGE URL EXTRACTED:', cleanImageUrl);
+        cleanImageUrl = await restoreFace(cleanImageUrl);
+      }
+
+      return cleanImageUrl;
     };
 
-    console.log('API Response:', JSON.stringify(responseData, null, 2));
+    const tier = (qualityTier || '').toString().toLowerCase();
+    console.log(`🎬 GENERATING VIDEO (${tier || 'standard'})...`);
 
-    return NextResponse.json(responseData);
+    let finalVideoUrl = '';
+    let audioMerged = false;
+    let audioUrlForLipSync = '';
+    let cleanImageUrl = '';
+    const isAudioDrivenPipeline = audioDrivenSource && Boolean(audioScript || sfxPromptText);
 
-  } catch (error: any) {
-    console.error('=== VIDEO GENERATION ERROR ===');
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    console.error('Error details:', error);
-    console.error('Error type:', error.constructor.name);
-    
-    // Check if it's a 422 error from Replicate
-    if (error.status === 422 || error.message?.includes('422')) {
-      console.error('422 Unprocessable Entity - Request format issue');
-      console.error('Error details:', JSON.stringify(error, null, 2));
-      console.error('This usually means:');
-      console.error('1. Model name/version is incorrect or invalid');
-      console.error('2. Input parameters don\'t match model requirements');
-      console.error('3. Image format is invalid');
-      console.error('4. Missing required parameters');
-      console.error('5. Model name format should be: owner/model-name (e.g., lucataco/luma-dream-machine)');
-      
-      // Return more detailed error for 422
-      const errorMessage = error.message || 'Invalid model version or request format';
-      const errorDetails = error.detail || error.toString();
-      
-      return NextResponse.json(
-        { 
-          error: errorMessage,
-          details: errorDetails,
-          statusCode: 422,
-          suggestion: 'Please verify the model name is correct. Use format: owner/model-name (e.g., lucataco/luma-dream-machine or kling-ai/kling-v1). Check Replicate documentation for available models.'
-        },
-        { status: 422 }
-      );
+    console.log('--- DEBUG KONTROL ---');
+    console.log('1. Dialogue Var mı?:', !!dialogue);
+    console.log('2. Audio Category Nedir?:', audioContentType);
+    console.log('3. Voice ID Var mı?:', voiceId);
+    console.log('--- DEBUG SONU ---');
+
+    if (isAudioDrivenPipeline) {
+      if (voiceEmotion) {
+        console.log('🎭 VOICE EMOTION:', voiceEmotion);
+      }
+      const voiceTask = audioScript
+        ? generateSpeech({
+          text: audioScript,
+          voiceId,
+          emotion_level: voiceEmotionSettings?.style ?? 0.5,
+        })
+        : Promise.resolve('');
+      const sfxTask = sfxPromptText ? generateSfxAudioUrl(sfxPromptText) : Promise.resolve('');
+
+      const [imageUrl, voiceUrl, sfxUrl] = await Promise.all([
+        buildReferenceImage(),
+        voiceTask,
+        sfxTask,
+      ]);
+
+      cleanImageUrl = imageUrl;
+
+      let klingImageUrl = await ensureReplicateUri(cleanImageUrl, 'image.jpg', 'image/jpeg');
+      let klingAudioUrl = voiceUrl
+        ? await ensureReplicateUri(voiceUrl, 'audio.mp3', 'audio/mpeg')
+        : '';
+      if (klingImageUrl.includes('api.replicate.com/v1/files/')) {
+        klingImageUrl = await resolveReplicateFileUrl(klingImageUrl, process.env.REPLICATE_API_TOKEN || '');
+      }
+      if (klingAudioUrl.includes('api.replicate.com/v1/files/')) {
+        klingAudioUrl = await resolveReplicateFileUrl(klingAudioUrl, process.env.REPLICATE_API_TOKEN || '');
+      }
+      console.log('🎧 KLING AUDIO URI:', klingAudioUrl);
+      if (!klingAudioUrl || !/^https?:\/\//.test(klingAudioUrl)) {
+        throw new Error(`Kling audio URI invalid: ${klingAudioUrl || 'empty'}`);
+      }
+
+      if (!voiceUrl) {
+        throw new Error('Audio-driven pipeline requires speech audio.');
+      }
+      if (!sfxUrl) {
+        throw new Error('Audio-driven pipeline requires SFX audio.');
+      }
+
+      console.log('🎬 MODE: AUDIO-DRIVEN CINEMATIC (Kling Avatar v2)');
+      const avatarModel = 'kwaivgi/kling-avatar-v2';
+      const avatarOutput = await runReplicateWithRetry(avatarModel, {
+        image: klingImageUrl,
+        audio: klingAudioUrl,
+        prompt: avatarPerformance || 'subtle head movement, micro facial expressions',
+        cfg_scale: 0.6,
+      });
+      console.log('🎥 AVATAR OUTPUT:', avatarOutput);
+
+      let avatarVideoUrl = extractImageUrl(avatarOutput);
+      if (!avatarVideoUrl) {
+        const stream = findFirstStream(avatarOutput);
+        if (stream) {
+          try {
+            console.log('🧪 AVATAR STREAM OUTPUT DETECTED: saving locally...');
+            avatarVideoUrl = await saveStreamToPublic(stream, 'mp4');
+            console.log('✅ LOCAL AVATAR VIDEO URL:', avatarVideoUrl);
+          } catch (error) {
+            console.error('❌ AVATAR STREAM SAVE FAILED:', error);
+          }
+        }
+      }
+      if (!avatarVideoUrl || typeof avatarVideoUrl !== 'string') {
+        throw new Error('Critical: Avatar video generation failed.');
+      }
+
+      avatarVideoUrl = await normalizeReplicateAssetUrl(avatarVideoUrl);
+      const mixed = await mixVideoWithDucking({
+        videoUrl: avatarVideoUrl,
+        voiceUrl,
+        sfxUrl,
+        voiceVolume: 1.0,
+        sfxBedVolume: 0.6,
+        duckedSfxVolume: 0.2,
+      });
+      finalVideoUrl = mixed.videoUrl;
+      audioMerged = true;
+
+      return NextResponse.json({
+        success: true,
+        videoUrl: finalVideoUrl,
+        imageUrl: cleanImageUrl,
+        imagePrompt,
+        videoPrompt,
+        usedGeminiImagePrompt,
+        usedGeminiVideoPrompt,
+        audioMerged,
+      });
     }
 
-    // Preserve 429 status code for frontend retry logic
-    const statusCode = error.status || 500;
-    
-    return NextResponse.json(
-      { 
-        error: error.message || 'Failed to start video generation',
-        details: error.toString(),
-        statusCode: statusCode,
-      },
-      { status: statusCode }
-    );
+    cleanImageUrl = await buildReferenceImage();
+
+    if (dialogue && audioContentType === 'speech') {
+      try {
+        console.log('🎙️ GENERATING AUDIO FOR LIP-SYNC...');
+        const rawAudioUrl = await generateSpeech({
+          text: dialogue,
+          voiceId,
+          emotion_level: voiceEmotionSettings?.style ?? 0.5,
+        });
+        audioUrlForLipSync = await ensureReplicateUri(rawAudioUrl, 'audio.mp3', 'audio/mpeg');
+      } catch (error) {
+        console.warn('Failed to generate speech audio for LivePortrait.', error);
+      }
+    }
+
+    if (audioUrlForLipSync && audioContentType === 'speech') {
+      try {
+        console.log('🎬 MODE: TALKING HEAD (LivePortrait)');
+        finalVideoUrl = await generateLivePortraitVideo(cleanImageUrl, audioUrlForLipSync);
+        audioMerged = true;
+      } catch (error) {
+        console.error('⚠️ LivePortrait failed, falling back to Kling', error);
+      }
+    }
+
+    if (!finalVideoUrl) {
+      const videoPromptWithRef = `Match the reference image exactly (subject identity, outfit, lighting, framing). Start from the same scene. ${videoPrompt}`;
+      const klingImageUrl = await ensureReplicateUri(cleanImageUrl, 'image.jpg', 'image/jpeg');
+      const videoModel = 'kwaivgi/kling-v2.5-turbo-pro';
+      const videoInput: Record<string, any> = {
+        prompt: videoPromptWithRef,
+        start_image: klingImageUrl,
+        image_fidelity: 0.75,
+        aspect_ratio: '16:9',
+        duration: 30,
+        cfg_scale: 0.5,
+      };
+
+      const videoOutput = await runReplicateWithRetry(videoModel, videoInput);
+      console.log('🎥 RAW VIDEO OUTPUT:', videoOutput);
+
+      let cleanVideoUrl = extractImageUrl(videoOutput);
+      if (!cleanVideoUrl) {
+        const stream = findFirstStream(videoOutput);
+        if (stream) {
+          try {
+            console.log('🧪 VIDEO STREAM OUTPUT DETECTED: saving locally...');
+            cleanVideoUrl = await saveStreamToPublic(stream, 'mp4');
+            console.log('✅ LOCAL VIDEO URL:', cleanVideoUrl);
+          } catch (error) {
+            console.error('❌ VIDEO STREAM SAVE FAILED:', error);
+          }
+        }
+      }
+      const replicateFilePrefix = 'https://api.replicate.com/v1/files/';
+      if (cleanVideoUrl && cleanVideoUrl.includes('api.replicate.com/v1/files/')) {
+        cleanVideoUrl = await resolveReplicateFileUrl(cleanVideoUrl, process.env.REPLICATE_API_TOKEN || '');
+        if (cleanVideoUrl.startsWith(replicateFilePrefix)) {
+          const fileId = cleanVideoUrl.slice(replicateFilePrefix.length);
+          cleanVideoUrl = `/api/replicate-file?id=${encodeURIComponent(fileId)}`;
+        }
+      }
+
+      if (!cleanVideoUrl || typeof cleanVideoUrl !== 'string') {
+        throw new Error('Critical: Video generation finished but returned an invalid format. Expected a plain URL string.');
+      }
+
+      finalVideoUrl = cleanVideoUrl;
+      if (audioContentType === 'speech' || audioContentType === 'sfx') {
+        try {
+          const merged = await processVideoWithAudio({
+            videoUrl: cleanVideoUrl,
+            dialogue,
+            audioCategory: audioContentType,
+            targetDuration: 6,
+            voiceId,
+            format: voiceFormat,
+          });
+          finalVideoUrl = merged.videoUrl;
+          audioMerged = merged.audioMerged;
+        } catch (error) {
+          console.warn('Audio generation failed, returning silent video.', error);
+        }
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      videoUrl: finalVideoUrl,
+      imageUrl: cleanImageUrl,
+      imagePrompt,
+      videoPrompt,
+      usedGeminiImagePrompt,
+      usedGeminiVideoPrompt,
+      audioMerged,
+    });
+  } catch (error: any) {
+    console.error('❌ GENERATION ERROR:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

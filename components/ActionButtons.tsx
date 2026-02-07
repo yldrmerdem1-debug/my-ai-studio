@@ -31,8 +31,8 @@ const actions = [
   },
   {
     id: 'ad-script',
-    label: 'AI Ad Script',
-    subtitle: 'Text generator',
+    label: 'AI Director',
+    subtitle: 'Strategy Center',
     icon: FileText,
     iconColor: '#f59e0b',
   },

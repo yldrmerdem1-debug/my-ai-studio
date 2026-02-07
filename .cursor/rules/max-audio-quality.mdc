@@ -1,0 +1,19 @@
+---
+description: Enforce maximum audio quality and sync standards throughout the project.
+globs: ["lib/audio-*.ts", "app/api/audio/**/*.ts", "**/route.ts", "**/*audio*", "lib/voice*.ts", "lib/videoProcessor.ts", "components/VideoPlayerWithAudio.tsx"]
+alwaysApply: false
+---
+
+# Maximum Audio Quality Policy
+
+- Never reduce audio quality settings or replace ElevenLabs with lower-quality alternatives.
+- Keep `eleven_multilingual_v2` and `mp3_44100_192` for speech output.
+- Preserve SFX quality tags and `prompt_influence` (0.5+) to keep detail and texture.
+- Maintain audio-driven sync settings for Kling Avatar (`audio_driven`, `audio_strength: 1.0`, `high_fidelity`).
+- Preserve ducking/mixing logic so speech stays clear (SFX ducked during speech).
+- If a change would lower audio quality or sync, propose an alternative that keeps quality intact.
+- If `npm run dev` is running, check terminal output for errors.
+- If there are errors, diagnose and fix them without asking, then retry.
+- Fix errors without reducing quality or changing the intended behavior.
+- Always apply the "Cinematic Filter" during FFmpeg merging: `[0:v]noise=alls=10:allf=t+u, vignette=PI/4[outv]`. Never use raw concatenation without visual post-processing.
+- When work is finished, reply with "Tamamlandı".

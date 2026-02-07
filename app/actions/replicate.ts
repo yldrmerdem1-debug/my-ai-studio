@@ -91,7 +91,7 @@ export async function trainPersonaLora(formData: FormData) {
   }
 }
 
-// AI Video - Use fofr/luma-dream-machine or kling-ai
+// AI Video - Use fofr/luma-dream-machine or kling v2.5
 export async function generateVideo(formData: FormData) {
   try {
     const replicate = getReplicateClient();
@@ -106,7 +106,7 @@ export async function generateVideo(formData: FormData) {
 
     const modelMap: Record<string, string> = {
       luma: 'fofr/luma-dream-machine',
-      kling: 'kling-ai/kling-ai',
+      kling: 'kwaivgi/kling-v2.5-turbo-pro',
     };
 
     const modelName = modelMap[model] || modelMap['luma'];

@@ -9,9 +9,9 @@ const navItems = [
   { name: 'Studio', href: '/', icon: Film },
   { name: 'AI Persona Lab', href: '/persona', icon: Sparkles, isPremium: true, emphasis: 'primary' },
   { name: 'Image Studio', href: '/background-change', icon: ImageIcon, emphasis: 'secondary' },
-  { name: 'AI Video', href: '/video', icon: Video, emphasis: 'secondary' },
-  { name: 'Ad Script', href: '/ad-script', icon: Volume2, emphasis: 'secondary' },
-  { name: 'Ad Creation', href: '/ad-creation', icon: FileText, emphasis: 'utility' },
+  { name: 'AI Video Factory', href: '/video', icon: Video, emphasis: 'secondary' },
+  { name: 'AI Director', href: '/ad-script', icon: Volume2, emphasis: 'secondary' },
+  { name: 'Auto-Editor', href: '/ad-creation', icon: FileText, emphasis: 'utility' },
   { name: 'My Assets', href: '/my-assets', icon: Folder, emphasis: 'utility' },
   { name: 'Subscription', href: '#', icon: Gem, isModal: true, emphasis: 'utility' },
 ];

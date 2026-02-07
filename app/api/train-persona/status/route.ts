@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
 
 export async function GET(request: NextRequest) {
   try {
@@ -26,11 +25,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Initialize Replicate client
-    const replicate = new Replicate({
-      auth: apiToken.trim(),
-    });
-
     const { searchParams } = new URL(request.url);
     const trainingId = searchParams.get('id');
 
@@ -41,8 +35,31 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get training status
-    const prediction = await replicate.predictions.get(trainingId);
+    const response = await fetch(`https://api.replicate.com/v1/trainings/${trainingId}`, {
+      headers: {
+        Authorization: `Token ${apiToken.trim()}`,
+      },
+    });
+
+    const responseText = await response.text();
+    let payload: any = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      payload = responseText;
+    }
+
+    if (!response.ok) {
+      console.error('Training status error:', {
+        trainingId,
+        status: response.status,
+        response: payload,
+      });
+      return NextResponse.json(
+        { error: 'Failed to check training status', status: 'error' },
+        { status: 502 }
+      );
+    }
 
     // Calculate progress based on status
     let progress = 0;
@@ -50,12 +67,12 @@ export async function GET(request: NextRequest) {
 
     let modelId: string | null = null;
 
-    switch (prediction.status) {
+    switch (payload?.status) {
       case 'starting':
         progress = 10;
         statusMessage = 'Initializing training...';
         break;
-      case 'processing':
+      case 'running':
         progress = 50;
         statusMessage = 'Training in progress...';
         break;
@@ -65,24 +82,24 @@ export async function GET(request: NextRequest) {
         
         // Extract model ID from output
         // The model ID could be in various formats depending on the training model
-        if (prediction.output) {
-          if (typeof prediction.output === 'string') {
+        if (payload?.output) {
+          if (typeof payload.output === 'string') {
             // If output is a string, it might be the model ID or a URL
-            if (prediction.output.startsWith('http') || prediction.output.includes('model') || prediction.output.includes('lora')) {
-              modelId = prediction.output;
+            if (payload.output.startsWith('http') || payload.output.includes('model') || payload.output.includes('lora')) {
+              modelId = payload.output;
             } else {
-              modelId = prediction.output;
+              modelId = payload.output;
             }
-          } else if (Array.isArray(prediction.output)) {
+          } else if (Array.isArray(payload.output)) {
             // If it's an array, take the first element
-            modelId = prediction.output[0] || null;
+            modelId = payload.output[0] || null;
             // If first element is an object, try to extract model ID from it
             if (typeof modelId === 'object' && modelId !== null) {
               const obj = modelId as any;
               modelId = obj.model_id || obj.modelId || obj.model || obj.url || obj.lora_url || null;
             }
-          } else if (typeof prediction.output === 'object' && prediction.output !== null) {
-            const output = prediction.output as any;
+          } else if (typeof payload.output === 'object' && payload.output !== null) {
+            const output = payload.output as any;
             // Try various possible field names for model ID
             modelId = output.model_id || 
                      output.modelId || 
@@ -123,7 +140,7 @@ export async function GET(request: NextRequest) {
         break;
       case 'failed':
         progress = 0;
-        statusMessage = `Training failed: ${prediction.error || 'Unknown error'}`;
+        statusMessage = `Training failed: ${payload?.error || 'Unknown error'}`;
         break;
       case 'canceled':
         progress = 0;
@@ -135,12 +152,10 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      status: prediction.status,
-      progress: progress / 100, // Normalize to 0-1
-      statusMessage: statusMessage,
-      error: prediction.error || null,
-      output: prediction.output || null,
-      modelId: modelId, // Model ID for saving to database
+      status: payload?.status,
+      progress: progress / 100,
+      statusMessage,
+      error: payload?.error || null,
     });
 
   } catch (error: any) {

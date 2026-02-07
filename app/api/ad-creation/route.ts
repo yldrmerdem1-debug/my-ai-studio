@@ -29,8 +29,8 @@ export async function POST(request: NextRequest) {
     const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
     const imageBase64 = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
 
-    // Use fofr/luma-dream-machine or kling-ai for video generation
-    const modelOptions = ['fofr/luma-dream-machine', 'kling-ai/kling-ai'];
+    // Use fofr/luma-dream-machine or kling v2.5 for video generation
+    const modelOptions = ['fofr/luma-dream-machine', 'kwaivgi/kling-v2.5-turbo-pro'];
     let prediction;
     let lastError;
 

@@ -73,8 +73,8 @@ const FEATURE_PREVIEWS: Array<VideoFeature | BeforeAfterFeature | CustomFeature>
   },
   {
     kind: "custom",
-    title: "Ad Script",
-    description: "Visual paired with a subtle voice waveform",
+    title: "AI Director",
+    description: "Turns links into a full scene plan",
     preview: AdScriptPreview,
   },
 ];

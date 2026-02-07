@@ -1,939 +1,784 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
-import Link from 'next/link';
-import { Video, Camera, Lightbulb, Film, User, Music, Building2, Lock } from 'lucide-react';
+import { ImagePlus, Loader2, Plus, X, Video, Sparkles, CheckCircle2 } from 'lucide-react';
 import { usePersona } from '@/hooks/usePersona';
-import { canUsePersona } from '@/lib/subscription';
+import VideoPlayerWithAudio from '@/components/VideoPlayerWithAudio';
 
-interface ImageSequence {
+type PersonaOption = {
   id: string;
-  file: File;
-  preview: string;
-  description: string;
-  order: number;
-}
+  name: string;
+  triggerWord?: string;
+  trigger_word?: string;
+  modelId?: string;
+  model_id?: string;
+  image_url?: string;
+  imageUrl?: string;
+  type?: 'visual' | 'voice';
+  voiceStatus?: 'none' | 'training' | 'ready';
+  visualStatus?: 'none' | 'training' | 'ready';
+  status?: string;
+};
 
-interface ChatMessage {
+type SelectedAssets = {
+  selectedPersona: PersonaOption | null;
+  voicePersonaId: string | null;
+  voicePersonaName: string | null;
+  imageFile: File | null;
+  imagePreview: string | null;
+};
+
+
+type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
-}
+  text: string;
+  videoUrl?: string | null;
+  audioMerged?: boolean;
+};
+
+type DirectorPlanPayload = {
+  scenario: {
+    title?: string;
+    hook?: string;
+    angle?: string;
+    plan?: {
+      visual_prompt?: string;
+      audio_script?: string;
+      voice_emotion?: string;
+      sfx_prompt?: string;
+      camera_movement?: string;
+    };
+  };
+  inputs?: Record<string, string>;
+  createdAt?: string;
+};
+
+let cachedPersonas: PersonaOption[] | null = null;
+
+const usePersonaOptions = (user: any) => {
+  const [personaOptions, setPersonaOptions] = useState<PersonaOption[]>([]);
+  const cacheKey = useMemo(() => {
+    const id = user?.id || 'anon';
+    return `personaOptionsCache:${id}`;
+  }, [user?.id]);
+
+  const fetchPersonas = useCallback((force = false) => {
+    let isActive = true;
+    if (cachedPersonas && !force) {
+      setPersonaOptions(cachedPersonas);
+      return () => {
+        isActive = false;
+      };
+    }
+    if (!cachedPersonas && typeof window !== 'undefined') {
+      try {
+        const cachedRaw = localStorage.getItem(cacheKey);
+        const cachedParsed = cachedRaw ? JSON.parse(cachedRaw) : null;
+        if (Array.isArray(cachedParsed) && cachedParsed.length > 0) {
+          cachedPersonas = cachedParsed;
+          setPersonaOptions(cachedParsed);
+        }
+      } catch (error) {
+        console.warn('Failed to read persona cache', error);
+      }
+    }
+    const run = async () => {
+      try {
+        const userQuery = user?.id ? `?userId=${user.id}` : '';
+        const cacheBuster = Date.now();
+        const listQuery = userQuery ? `${userQuery}&t=${cacheBuster}` : `?t=${cacheBuster}`;
+        const res = await fetch(`/api/save-persona${listQuery}`, {
+          cache: 'no-store',
+          headers: { Pragma: 'no-cache' },
+        });
+        const rawData = await res.json().catch(() => ({}));
+        const personasPayload = Array.isArray(rawData?.personas) ? rawData.personas : Array.isArray(rawData) ? rawData : [];
+        if (!res.ok) {
+          console.error('Supabase Response:', rawData);
+          if (isActive) {
+            setPersonaOptions([]);
+          }
+          return;
+        }
+        console.log('🔥 RAW DATA INTO STATE:', personasPayload);
+        if (isActive) {
+          cachedPersonas = personasPayload;
+          setPersonaOptions(cachedPersonas);
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify(cachedPersonas));
+            } catch (error) {
+              console.warn('Failed to write persona cache', error);
+            }
+          }
+        }
+      } catch (error) {
+        if (isActive) {
+          setPersonaOptions([]);
+        }
+      }
+    };
+    run();
+    return () => {
+      isActive = false;
+    };
+  }, [user?.id, cacheKey]);
+
+  useEffect(() => {
+    const cleanup = fetchPersonas();
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, [fetchPersonas]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleUpdate = () => {
+      cachedPersonas = null;
+      fetchPersonas(true);
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === 'personasUpdated') {
+        handleUpdate();
+      }
+    };
+    window.addEventListener('personas:updated', handleUpdate);
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleUpdate);
+    document.addEventListener('visibilitychange', handleUpdate);
+    return () => {
+      window.removeEventListener('personas:updated', handleUpdate);
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleUpdate);
+      document.removeEventListener('visibilitychange', handleUpdate);
+    };
+  }, [fetchPersonas]);
+
+  return { personaOptions };
+};
 
 export default function VideoPage() {
-  const [selectedPersona, setSelectedPersona] = useState<string>('');
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState<string>('');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generationProgress, setGenerationProgress] = useState<number>(0);
-  const [generationStatus, setGenerationStatus] = useState<string>('');
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [videoId, setVideoId] = useState<string>('');
+  const { user } = usePersona();
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
-  const [imageSequence, setImageSequence] = useState<ImageSequence[]>([]);
-  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [generationMode, setGenerationMode] = useState<'images' | 'text-only'>('images');
-  const imageInputRef = useRef<HTMLInputElement>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
-  const { user, persona } = usePersona();
-  const canUsePersonaFeatures = canUsePersona(user);
-  const personaReady = persona?.visualStatus === 'ready';
-  const [personaMode, setPersonaMode] = useState<'generic' | 'persona'>('generic');
+  const [prompt, setPrompt] = useState('');
+  const [dialogueText, setDialogueText] = useState('');
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const { personaOptions } = usePersonaOptions(user);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [hasGenerated, setHasGenerated] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [audioMerged, setAudioMerged] = useState(false);
+  const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState('Analyzing Prompt...');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [directorPlan, setDirectorPlan] = useState<DirectorPlanPayload | null>(null);
+  const [selected, setSelected] = useState<SelectedAssets>({
+    selectedPersona: null,
+    voicePersonaId: null,
+    voicePersonaName: null,
+    imageFile: null,
+    imagePreview: null,
+  });
+  const selectedIdRef = useRef<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const generationRunRef = useRef(0);
 
-  // In a real app, this would come from a database/API
-  // For now, we'll use localStorage or allow manual entry
-  const [trainedPersonas, setTrainedPersonas] = useState<string[]>([]);
+  const voiceOptions = useMemo(
+    () => [
+      { id: 'voice-1', name: 'Studio Voice' },
+      { id: 'voice-2', name: 'Narrator Voice' },
+      { id: 'voice-3', name: 'Warm Voice' },
+    ],
+    []
+  );
 
-  // Load trained personas from localStorage on mount
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('trainedPersonas');
-      if (saved) {
-        try {
-          setTrainedPersonas(JSON.parse(saved));
-        } catch (e) {
-          console.error('Failed to load personas:', e);
-        }
-      }
+    console.log('✅ STATE UPDATED: Selected Persona is now:', selected.selectedPersona);
+  }, [selected.selectedPersona]);
 
-      // Also load trigger words from training completions
-      const savedTriggerWords = localStorage.getItem('triggerWords');
-      if (savedTriggerWords) {
-        try {
-          const words = JSON.parse(savedTriggerWords);
-          setTrainedPersonas(prev => {
-            const combined = [...new Set([...prev, ...words])];
-            return combined;
-          });
-        } catch (e) {
-          console.error('Failed to load trigger words:', e);
-        }
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const raw = localStorage.getItem('adDirectorPlan');
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as DirectorPlanPayload;
+      const plan = parsed?.scenario?.plan;
+      if (plan?.visual_prompt) {
+        setPrompt(plan.visual_prompt);
       }
+      if (plan?.audio_script) {
+        setDialogueText(plan.audio_script);
+      }
+      setDirectorPlan(parsed);
+    } catch (error) {
+      console.warn('Failed to parse director plan from storage', error);
     }
   }, []);
 
-  // Scroll chat to bottom when new messages are added
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
-
-  const handleChatSubmit = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    
-    if (!chatInput.trim()) {
-      alert('Please enter a video description');
-      return;
-    }
-    
-    // In images mode, warn if no images but allow text-only generation
-    if (generationMode === 'images' && imageSequence.length === 0) {
-      const proceed = confirm('No images uploaded. Continue with text-to-video generation?');
-      if (!proceed) return;
-    }
-
-    // Disable button immediately to prevent multiple requests
-    setIsGenerating(true);
-
-    // Add user message to chat
-    const userMessage: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      role: 'user',
-      content: chatInput.trim(),
-      timestamp: new Date(),
+    const handleSelectPersona = (persona: any) => {
+      const clickedId = persona?.id || persona?.modelId || persona?.model_id || persona?._id;
+      if (!clickedId) {
+        console.error('❌ CRITICAL: Clicked card has no ID!', persona);
+        alert('Hata: Bu kartın kimlik bilgisi (ID) eksik.');
+        return;
+      }
+      console.log('🟢 CLICK VALIDATED. Saving ID:', clickedId);
+      selectedIdRef.current = clickedId;
+      setSelected(prev => ({
+        ...prev,
+        selectedPersona: persona,
+      }));
+      setIsMenuOpen(false);
     };
 
-    setChatMessages(prev => [...prev, userMessage]);
-    setChatInput('');
-
-    // Generate video based on chat input
-    await generateVideoFromChat(chatInput.trim());
-  };
-
-  const generateVideoFromChat = async (userPrompt: string) => {
-    const triggerWord = personaMode === 'persona' ? selectedPersona : '';
-    const isTextOnlyMode = generationMode === 'text-only' || imageSequence.length === 0;
-
-    if (personaMode === 'persona') {
-      if (!canUsePersonaFeatures) {
-        setIsPricingModalOpen(true);
-        alert('Premium plan required to use Persona Mode.');
-        return;
-      }
-      if (!personaReady) {
-        alert('Persona Mode requires a ready visual persona.');
-        return;
-      }
-      if (!persona?.id) {
-        alert('Persona Mode requires a persona identity.');
-        return;
-      }
-    }
-    
-    setIsGenerating(true);
-    setGenerationProgress(0);
-    setGenerationStatus(isTextOnlyMode ? 'Starting text-to-video generation...' : 'Preparing video generation...');
-    setVideoUrl(null);
-
-    try {
-      // Build comprehensive prompt from chat
-      // The user's chat input may already reference images, so we preserve it
-      let fullPrompt = userPrompt;
-
-      // If we have images and user hasn't referenced them, auto-add references
-      if (imageSequence.length > 0 && !userPrompt.toLowerCase().includes('image')) {
-        const imageReferences = imageSequence
-          .sort((a, b) => a.order - b.order)
-          .map((img, index) => {
-            const desc = img.description.trim() || 'action/transition';
-            return `Image ${index + 1}: ${desc}`;
-          });
-        // Add image references before user's prompt
-        fullPrompt = `${imageReferences.join('. ')}. ${userPrompt}`;
-      }
-
-      // Enhance prompt with dynamic control suggestions if not already present
-      // Add cinematic enhancements if user mentions camera/lighting/etc
-      const hasCameraMention = /camera|pan|zoom|rotate|movement/i.test(userPrompt);
-      const hasLightingMention = /lighting|light|bright|dark|mood/i.test(userPrompt);
-      const hasTransitionMention = /transition|smooth|quick|fade/i.test(userPrompt);
-      
-      // Prepend persona trigger word if selected
-      if (triggerWord && triggerWord.trim()) {
-        fullPrompt = `${triggerWord} ${fullPrompt}`;
-      }
-      
-      // Add quality and cinematic enhancements
-      if (!fullPrompt.toLowerCase().includes('cinematic') && !fullPrompt.toLowerCase().includes('high quality')) {
-        fullPrompt = `${fullPrompt}, cinematic, high quality, professional video`;
-      }
-
-      setGenerationStatus('Sending request to AI video generator...');
-      setGenerationProgress(20);
-
-      // Prepare request body
-      const requestBody: any = {
-        prompt: fullPrompt,
-        triggerWord: triggerWord || undefined,
-        personaMode,
-        personaStatus: persona?.visualStatus ?? 'none',
-        personaId: persona?.id,
-        isTextOnly: isTextOnlyMode,
-        mode: isTextOnlyMode ? 'text-to-video' : 'image-to-video',
-        user,
-      };
-
-      // Add images if we have them
-      if (imageSequence.length > 0) {
-        setGenerationStatus('Converting images to sequence...');
-        setGenerationProgress(30);
-
-        const imagePromises = imageSequence
-          .sort((a, b) => a.order - b.order)
-          .map(async (img) => {
-            return new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.readAsDataURL(img.file);
-              reader.onload = () => resolve(reader.result as string);
-              reader.onerror = reject;
-            });
-          });
-
-        const imageBase64Array = await Promise.all(imagePromises);
-        requestBody.images = imageBase64Array;
-        requestBody.descriptions = imageSequence
-          .sort((a, b) => a.order - b.order)
-          .map(img => img.description);
-      }
-
-      setGenerationStatus('Starting video generation...');
-      setGenerationProgress(40);
-
-      // Retry logic for 429 errors
-      let videoResponse;
-      let retryCount = 0;
-      const maxRetries = 1; // Retry once
-
-      // Helper to extract retry_after duration from response
-      const getRetryAfter = (response: Response): number => {
-        const retryAfterHeader = response.headers.get('retry-after');
-        if (retryAfterHeader) {
-          const retryAfter = parseInt(retryAfterHeader, 10);
-          if (!isNaN(retryAfter) && retryAfter > 0) {
-            return retryAfter * 1000; // Convert to milliseconds
-          }
-        }
-        // Default to 5 seconds if not specified
-        return 5000;
-      };
-
-      while (retryCount <= maxRetries) {
-        try {
-          videoResponse = await fetch('/api/generate-video', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
-          });
-
-          // If 429 error and we haven't retried yet, wait and retry
-          if (videoResponse.status === 429 && retryCount < maxRetries) {
-            const retryAfter = getRetryAfter(videoResponse);
-            const retrySeconds = Math.ceil(retryAfter / 1000);
-            setGenerationStatus(`Replicate is processing other requests. Retrying in ${retrySeconds} seconds...`);
-            setGenerationProgress(40);
-            
-            // Wait for retry_after duration before retrying
-            await new Promise(resolve => setTimeout(resolve, retryAfter));
-            
-            retryCount++;
-            setGenerationStatus('Retrying video generation request...');
-            continue;
-          }
-
-          // If not 429 or we've already retried, break out of loop
-          break;
-        } catch (fetchError: any) {
-          // If it's a network error and we haven't retried, wait and retry
-          if (retryCount < maxRetries) {
-            setGenerationStatus('Replicate is processing other requests. Retrying in 5 seconds...');
-            setGenerationProgress(40);
-            
-            // Wait 5 seconds before retrying (network errors don't have retry_after)
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            retryCount++;
-            setGenerationStatus('Retrying video generation request...');
-            continue;
-          }
-          // If we've already retried or it's not a retryable error, throw it
-          throw fetchError;
-        }
-      }
-
-      if (!videoResponse || !videoResponse.ok) {
-        const error = await videoResponse?.json().catch(() => ({ error: 'Video generation failed' }));
-        throw new Error(error.error || 'Video generation failed');
-      }
-
-      const data = await videoResponse.json();
-      setVideoId(data.videoId);
-      setGenerationStatus('Video generation started! Monitoring progress...');
-      setGenerationProgress(20);
-
-      // Poll for video generation status
-      pollVideoStatus(data.videoId);
-
-    } catch (error: any) {
-      console.error('Video generation error:', error);
-      
-      // Check for safety filter error (E005)
-      if (error.message?.includes('E005') || error.message?.toLowerCase().includes('sensitive') || error.message?.toLowerCase().includes('safety')) {
-        alert('Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.');
-        
-        // Add error message to chat
-        const errorMessage: ChatMessage = {
-          id: `msg-${Date.now()}-error`,
-          role: 'assistant',
-          content: '⚠️ Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.',
-          timestamp: new Date(),
-        };
-        setChatMessages(prev => [...prev, errorMessage]);
-      } else if (error.message?.includes('429') || error.message?.includes('Too Many Requests')) {
-        // Check if it's a 429 error that we couldn't retry
-        alert('Video generation failed: Replicate is currently processing too many requests. Please try again in a few moments.');
-      } else {
-        alert(`Video generation failed: ${error.message}`);
-      }
-      
-      // Always reset generating state so button becomes active again
-      setIsGenerating(false);
-      setGenerationProgress(0);
-      setGenerationStatus('');
-    }
-  };
-
-  const pollVideoStatus = async (id: string) => {
-    const maxAttempts = 180; // 15 minutes max (5 second intervals)
-    let attempts = 0;
-
-    const poll = async () => {
-      try {
-        const statusResponse = await fetch(`/api/generate-video/status?id=${id}`);
-        const data = await statusResponse.json();
-
-        if (data.status === 'succeeded' && data.videoUrl) {
-          setGenerationProgress(100);
-          setGenerationStatus('Video generation complete!');
-          const videoUrlResult = data.videoUrl;
-          setVideoUrl(videoUrlResult);
-          setIsGenerating(false);
-          
-          // Auto-save to My Assets
-          if (typeof window !== 'undefined') {
-            import('@/lib/assets-storage').then(({ saveVideoAsset }) => {
-              saveVideoAsset(videoUrlResult, `AI Video - ${new Date().toLocaleDateString()}`, {
-                model: 'minimax/video-01',
-              });
-            });
-          }
-          
-          // Add success message to chat
-          const successMessage: ChatMessage = {
-            id: `msg-${Date.now()}-success`,
-            role: 'assistant',
-            content: '🎬 Video generation complete! Your video is ready to download.',
-            timestamp: new Date(),
-          };
-          setChatMessages(prev => [...prev, successMessage]);
-          return;
-        }
-
-        if (data.status === 'failed') {
-          const errorMessage = data.error || 'Video generation failed';
-          // Check for safety filter error (E005) or sensitive content
-          if (errorMessage.includes('E005') || errorMessage.toLowerCase().includes('sensitive') || errorMessage.toLowerCase().includes('safety')) {
-            throw new Error('SAFETY_FILTER_E005');
-          }
-          throw new Error(errorMessage);
-        }
-
-        // Update progress based on status
-        if (data.progress !== undefined) {
-          setGenerationProgress(20 + (data.progress * 0.8)); // 20-100% range
-        }
-
-        setGenerationStatus(data.statusMessage || 'Generating video...');
-
-        attempts++;
-        if (attempts < maxAttempts) {
-          setTimeout(poll, 5000); // Poll every 5 seconds
-        } else {
-          throw new Error('Video generation timeout');
-        }
-      } catch (error: any) {
-        console.error('Polling error:', error);
-        
-        // Check for safety filter error (E005)
-        if (error.message === 'SAFETY_FILTER_E005' || error.message?.includes('E005') || error.message?.toLowerCase().includes('sensitive') || error.message?.toLowerCase().includes('safety')) {
-          setGenerationStatus('Güvenlik filtresi hatası');
-          alert('Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.');
-          
-          // Add error message to chat
-          const errorMessage: ChatMessage = {
-            id: `msg-${Date.now()}-error`,
-            role: 'assistant',
-            content: '⚠️ Üzgünüz, bu içerik güvenlik filtresine takıldı. Lütfen daha farklı bir açıklama yazmayı deneyin.',
-            timestamp: new Date(),
-          };
-          setChatMessages(prev => [...prev, errorMessage]);
-        } else {
-          setGenerationStatus(`Error: ${error.message}`);
-          alert(`Video generation failed: ${error.message}`);
-        }
-        
-        // Always reset generating state so button becomes active again
-        setIsGenerating(false);
-        setGenerationProgress(0);
-        setGenerationStatus('');
-      }
-    };
-
-    poll();
-  };
-
-  const downloadVideo = () => {
-    if (!videoUrl) return;
-
-    const link = document.createElement('a');
-    link.href = videoUrl;
-    link.download = `ai-video-${Date.now()}.mp4`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // Handle multiple image uploads
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    const imageFiles = files.filter(file => file.type.startsWith('image/'));
-    
-    const newImages: ImageSequence[] = imageFiles.map((file, index) => ({
-      id: `img-${Date.now()}-${index}`,
-      file,
-      preview: URL.createObjectURL(file),
-      description: '',
-      order: imageSequence.length + index,
+  const handleSelectVoice = (option: PersonaOption) => {
+    setSelected(prev => ({
+      ...prev,
+      voicePersonaId: option.id,
+      voicePersonaName: option.name,
     }));
-
-    setImageSequence(prev => [...prev, ...newImages]);
-    
-    // Clear input
-    if (e.target) {
-      e.target.value = '';
-    }
+    setIsMenuOpen(false);
   };
 
-  // Remove image from sequence
-  const removeImage = (id: string) => {
-    setImageSequence(prev => {
-      const filtered = prev.filter(img => img.id !== id);
-      // Reorder remaining images
-      return filtered.map((img, index) => ({ ...img, order: index }));
+  const handleImagePick = (file: File | null) => {
+    if (!file) return;
+    const preview = URL.createObjectURL(file);
+    setSelected(prev => ({
+      ...prev,
+      imageFile: file,
+      imagePreview: preview,
+    }));
+    setUploadedImageUrl(null);
+    setIsUploadingImage(true);
+    setIsMenuOpen(false);
+    const runUpload = async () => {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Failed to read image file.'));
+          reader.readAsDataURL(file);
+        });
+        const response = await fetch('/api/upload-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dataUrl, userId: user?.id }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || data.details || 'Failed to upload image');
+        }
+        if (!data.publicUrl || typeof data.publicUrl !== 'string') {
+          throw new Error('Upload succeeded but no public URL was returned');
+        }
+        setUploadedImageUrl(data.publicUrl);
+      } catch (error: any) {
+        setErrorMessage(error?.message || 'Failed to upload image');
+      } finally {
+        setIsUploadingImage(false);
+      }
+    };
+    runUpload();
+  };
+
+  // Auto-style is now handled server-side using optional image input.
+
+  const removeChip = (key: keyof SelectedAssets) => {
+    setSelected(prev => {
+      if (key === 'imageFile' || key === 'imagePreview') {
+        if (prev.imagePreview) URL.revokeObjectURL(prev.imagePreview);
+        setUploadedImageUrl(null);
+        setIsUploadingImage(false);
+        return { ...prev, imageFile: null, imagePreview: null };
+      }
+      if (key === 'selectedPersona') {
+        return { ...prev, selectedPersona: null };
+      }
+      if (key === 'voicePersonaId' || key === 'voicePersonaName') {
+        return { ...prev, voicePersonaId: null, voicePersonaName: null };
+      }
+      return prev;
     });
   };
 
-  // Update image description
-  const updateImageDescription = (id: string, description: string) => {
-    setImageSequence(prev =>
-      prev.map(img => (img.id === id ? { ...img, description } : img))
-    );
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const fetchWithTimeout = async (input: RequestInfo, init?: RequestInit, timeoutMs = 300000) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   };
 
-  // Drag and drop handlers for reordering images
-  const handleDragStart = (e: React.DragEvent, imgId: string) => {
-    const sortedSequence = [...imageSequence].sort((a, b) => a.order - b.order);
-    const index = sortedSequence.findIndex(img => img.id === imgId);
-    setDraggedIndex(index);
-    e.dataTransfer.effectAllowed = 'move';
+  const pollVideoStatus = async (videoId: string, runId: number) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 300000) {
+      if (generationRunRef.current !== runId) return null;
+      const response = await fetch(`/api/generate-video/status?id=${videoId}`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || data.details || 'Failed to check video status');
+      }
+      if (data.statusMessage) {
+        setStatusMessage(data.statusMessage);
+      }
+      if (data.status === 'succeeded') {
+        if (!data.videoUrl) {
+          throw new Error('Video generated but URL is missing');
+        }
+        return data.videoUrl as string;
+      }
+      if (data.status === 'failed' || data.status === 'canceled') {
+        throw new Error(data.error || 'Video generation failed');
+      }
+      await sleep(3000);
+    }
+    throw new Error('Video generation timed out');
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  };
-
-  const handleDrop = (e: React.DragEvent, dropImgId: string) => {
-    e.preventDefault();
-    if (draggedIndex === null) {
-      setDraggedIndex(null);
+  const handleGenerate = async (e?: React.MouseEvent<HTMLButtonElement>) => {
+    if (e) e.preventDefault();
+    if (!prompt.trim() || isGenerating) return;
+    const targetId = selectedIdRef.current || selected.selectedPersona?.id;
+    const exactPersona = personaOptions.find(option => option.id === targetId);
+    console.log('🕵️ DEBUGGING PERSONA:', exactPersona);
+    const finalModelId = (exactPersona as any)?.model_id
+      || (exactPersona as any)?.modelId
+      || (exactPersona as any)?.training_id
+      || (exactPersona as any)?.trainingId
+      || (exactPersona as any)?.replicate_model_id;
+    const finalImageUrl = exactPersona?.image_url
+      || exactPersona?.imageUrl
+      || '';
+    const finalTrigger = exactPersona
+      ? (exactPersona as any)?.trigger_word
+        || (exactPersona as any)?.triggerWord
+      : undefined;
+    if (targetId && (!exactPersona || !finalModelId)) {
+      alert(`⚠️ HATA: Model ID Eksik!\nID: ${targetId}\nDurum: ${exactPersona ? 'Bulundu' : 'Yok'}`);
       return;
     }
-
-    const sortedSequence = [...imageSequence].sort((a, b) => a.order - b.order);
-    const dropIndex = sortedSequence.findIndex(img => img.id === dropImgId);
-    
-    if (draggedIndex === dropIndex) {
-      setDraggedIndex(null);
+    console.log('🚀 GENERATING WITH:', exactPersona);
+    console.log('🚀 DEBUG: Sending Persona URL:', finalImageUrl);
+    if (selected.imageFile && (isUploadingImage || !uploadedImageUrl)) {
+      alert('Please wait for image upload to finish.');
       return;
     }
+    const currentRun = generationRunRef.current + 1;
+    generationRunRef.current = currentRun;
 
-    const draggedItem = sortedSequence[draggedIndex];
-    sortedSequence.splice(draggedIndex, 1);
-    sortedSequence.splice(dropIndex, 0, draggedItem);
+    setErrorMessage('');
+    setIsGenerating(true);
+    setHasGenerated(false);
+    setVideoUrl(null);
+    setAudioMerged(false);
+    setGeneratedImageUrl(null);
+    setIsMenuOpen(false);
+    const userMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setMessages(prev => ([
+      ...prev,
+      { id: userMessageId, role: 'user', text: prompt.trim() },
+    ]));
 
-    // Update order numbers
-    const reordered = sortedSequence.map((img, index) => ({
-      ...img,
-      order: index,
-    }));
+    const resolvedTriggerWord = finalTrigger || 'img';
+    const resolvedPrompt = exactPersona
+      ? `${resolvedTriggerWord} ${prompt.trim()}`.trim()
+      : prompt.trim();
+    try {
+      setStatusMessage('Generating video + voice...');
+      const videoResponse = await fetchWithTimeout('/api/generate-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: resolvedPrompt,
+          dialogue: dialogueText.trim(),
+          referenceImageUrl: uploadedImageUrl,
+          personaImageUrl:
+            finalImageUrl,
+          personaUrl: finalImageUrl,
+          personaModelId: finalModelId,
+          personaTriggerWord: finalTrigger,
+          persona: exactPersona,
+          isTextOnly: true,
+          personaMode: exactPersona ? 'persona' : 'generic',
+          personaId: exactPersona?.id,
+          id: exactPersona?.id,
+          modelId: finalModelId,
+          model_id: finalModelId,
+          triggerWord: exactPersona ? resolvedTriggerWord : undefined,
+          trigger_word: exactPersona ? resolvedTriggerWord : undefined,
+          user,
+        }),
+      });
+      const videoData = await videoResponse.json().catch(() => ({}));
+      if (!videoResponse.ok) {
+        throw new Error(videoData.error || videoData.details || 'Failed to start video generation');
+      }
+      if (videoData.imageUrl && generationRunRef.current === currentRun) {
+        setGeneratedImageUrl(videoData.imageUrl);
+      }
+      let rawVideoUrl = videoData.videoUrl as string | undefined;
+      if (!rawVideoUrl) {
+        if (!videoData.videoId) {
+          throw new Error('Video generation did not return an ID');
+        }
+        rawVideoUrl = await pollVideoStatus(videoData.videoId, currentRun);
+      }
+      if (!rawVideoUrl || generationRunRef.current !== currentRun) return;
 
-    setImageSequence(reordered);
-    setDraggedIndex(null);
+      const finalVideoUrl = rawVideoUrl;
+      setVideoUrl(finalVideoUrl);
+      setAudioMerged(Boolean(videoData.audioMerged));
+      setHasGenerated(true);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('latestRawVideoUrl', finalVideoUrl);
+      }
+      setMessages(prev => ([
+        ...prev,
+        {
+          id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          role: 'assistant',
+          text: 'Video hazır.',
+          videoUrl: finalVideoUrl,
+          audioMerged: Boolean(videoData.audioMerged),
+        },
+      ]));
+    } catch (error: any) {
+      if (generationRunRef.current !== currentRun) return;
+      setErrorMessage(error.message || 'Failed to generate video');
+    } finally {
+      if (generationRunRef.current === currentRun) {
+        setIsGenerating(false);
+      }
+    }
   };
 
-  const handleDragEnd = () => {
-    setDraggedIndex(null);
-  };
+  const isPersonaReady = (option: PersonaOption) =>
+    option.status === 'completed' || option.visualStatus === 'ready';
+  const succeededPersonas = personaOptions.filter(isPersonaReady);
+  const trainingPersonas = personaOptions.filter(option => !isPersonaReady(option));
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0a0a0a]">
+    <div className="min-h-screen bg-black text-white">
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
-      
-      <main className="ml-64 p-8">
-        <div className="mx-auto max-w-6xl">
-          {/* Header */}
-          <div className="mb-8">
-            <Link href="/" className="text-[#00d9ff] hover:text-[#00d9ff]/80 mb-4 inline-block">
-              ← Back to Studio
-            </Link>
-            <h1 className="text-4xl font-bold text-white mb-2">
-              <span className="bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] bg-clip-text text-transparent">
-                Generate 3D Motion
-              </span>
-            </h1>
-            <p className="text-gray-400 text-lg">
-              Create videos from text prompts or image sequences. Describe camera movements, lighting, transitions, and actions. Use your trained AI Personas for consistent characters.
+      <main className="ml-64 px-6 py-10">
+        <div className="mx-auto max-w-4xl">
+          <header className="text-center mb-10">
+            <h1 className="text-4xl font-bold">AI Video Factory</h1>
+            <p className="text-gray-400 mt-3">
+              Executes your director plan into a raw, high-quality talking video.
             </p>
-          </div>
+          </header>
 
-          {/* Persona Mode */}
-          <div className="glass rounded-2xl p-6 mb-8">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <h2 className="text-xl font-semibold text-white">Use Persona</h2>
-              <span className="text-xs text-white/50">Requires ready visual persona</span>
-            </div>
-            <div className="flex items-center justify-between gap-4 mb-6">
-              <p className="text-sm text-gray-300">
-                {personaMode === 'persona'
-                  ? 'Persona mode enabled — consistent identity across frames.'
-                  : 'Generic mode — no persona reference.'}
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  if (personaMode === 'persona') {
-                    setPersonaMode('generic');
-                    setSelectedPersona('');
-                  } else {
-                    setPersonaMode('persona');
-                  }
-                }}
-                className={`relative inline-flex h-8 w-16 items-center rounded-full transition-colors ${
-                  personaMode === 'persona' ? 'bg-[#00d9ff]' : 'bg-white/10'
-                }`}
-                disabled={isGenerating || !canUsePersonaFeatures || !personaReady}
-                title={
-                  !canUsePersonaFeatures
-                    ? 'Premium required to use Persona Mode.'
-                    : !personaReady
-                      ? 'Persona Mode requires a ready visual persona.'
-                      : ''
-                }
-                aria-pressed={personaMode === 'persona'}
-              >
-                <span
-                  className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
-                    personaMode === 'persona' ? 'translate-x-9' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
-            {!canUsePersonaFeatures && (
-              <p className="text-sm text-yellow-400 mb-4 flex items-center gap-2">
-                <Lock className="w-4 h-4" />
-                Premium required to use Persona Mode.
-              </p>
-            )}
-            {canUsePersonaFeatures && !personaReady && (
-              <p className="text-sm text-yellow-400 mb-4">
-                Persona Mode is disabled until your visual persona is ready.
-              </p>
-            )}
-
-            {/* Persona Selection - Only in Persona Mode */}
-            {personaMode === 'persona' && (
-              <div className="mb-4">
-                {trainedPersonas.length > 0 ? (
-                  <select
-                    value={selectedPersona}
-                    onChange={(e) => setSelectedPersona(e.target.value)}
-                    disabled={isGenerating || !canUsePersonaFeatures}
-                    className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
-                  >
-                    <option value="">Select a persona</option>
-                    {trainedPersonas.map((persona, index) => (
-                      <option key={index} value={persona}>
-                        {persona}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-                    <p className="text-yellow-400 text-sm">
-                      No trained personas found. Train one in the Persona Lab.
-                      {' '}
-                      <Link href="/persona" className="underline ml-1">
-                        Train your first persona
-                      </Link>
-                      {' '}for consistent character results.
-                    </p>
-                  </div>
-                )}
+          <section className="relative">
+            {directorPlan?.scenario?.plan && (
+              <div className="mb-6 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+                <div className="flex items-center gap-2 font-semibold">
+                  <CheckCircle2 className="h-4 w-4" />
+                  AI Director plan loaded
+                </div>
+                <p className="mt-2 text-xs text-emerald-200/80">
+                  Prompt and dialogue are pre-filled from your selected scenario.
+                </p>
               </div>
             )}
-          </div>
-
-          {/* Mode Selector */}
-          <div className="glass rounded-2xl p-6 mb-8">
-            <div className="flex items-center gap-4 mb-4">
-              <button
-                onClick={() => {
-                  setGenerationMode('text-only');
-                  setImageSequence([]);
-                }}
-                className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
-                  generationMode === 'text-only'
-                    ? 'bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white'
-                    : 'glass text-gray-300 hover:bg-white/5 border border-white/10'
-                }`}
-                disabled={isGenerating}
-              >
-                📝 Text-to-Video Only
-              </button>
-              <button
-                onClick={() => setGenerationMode('images')}
-                className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
-                  generationMode === 'images'
-                    ? 'bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white'
-                    : 'glass text-gray-300 hover:bg-white/5 border border-white/10'
-                }`}
-                disabled={isGenerating}
-              >
-                🖼️ With Images
-              </button>
-            </div>
-            <p className="text-xs text-gray-400 text-center">
-              {generationMode === 'text-only' 
-                ? 'Generate videos purely from text descriptions. No images needed.'
-                : 'Upload images and describe how they should be used in your video.'}
-            </p>
-          </div>
-
-          {/* Interactive Chat Interface */}
-          <div className="glass rounded-2xl p-6 mb-8 flex flex-col h-[500px]">
-            <h2 className="text-xl font-semibold text-white mb-4">Video Creation Chat</h2>
-            
-            {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto mb-4 space-y-4 pr-2">
-              {chatMessages.length === 0 && (
-                <div className="text-center text-gray-500 py-12">
-                  <p className="text-lg mb-2">👋 Start creating your video!</p>
-                  <p className="text-sm mb-4">Type your instructions below. You can describe:</p>
-                  <div className="grid grid-cols-2 gap-2 text-xs text-left max-w-md mx-auto">
-                    <div className="glass p-3 rounded-lg">🎥 Camera movements</div>
-                    <div className="glass p-3 rounded-lg">💡 Lighting & mood</div>
-                    <div className="glass p-3 rounded-lg">🎬 Scene transitions</div>
-                    <div className="glass p-3 rounded-lg">👤 Character actions</div>
-                    <div className="glass p-3 rounded-lg">🎵 Music suggestions</div>
-                    <div className="glass p-3 rounded-lg">🌆 Environment details</div>
-                  </div>
-                  {generationMode === 'images' && imageSequence.length > 0 && (
-                    <p className="text-sm mt-4 text-[#00d9ff]">
-                      Reference images like: "Image 1: character walking, Image 2: car approaching"
-                    </p>
-                  )}
-                </div>
+            <div className="mb-4 flex flex-wrap gap-2">
+              {selected.selectedPersona && (
+                <span className="inline-flex items-center gap-2 rounded-full bg-blue-500/20 px-3 py-1 text-sm text-blue-200">
+                  👤 {selected.selectedPersona.name ?? 'Persona'}
+                  <button
+                    type="button"
+                    onClick={() => removeChip('selectedPersona')}
+                    className="rounded-full bg-blue-500/30 p-1 hover:bg-blue-500/40"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
               )}
-
-              {chatMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
+              {selected.voicePersonaId && (
+                <span className="inline-flex items-center gap-2 rounded-full bg-purple-500/20 px-3 py-1 text-sm text-purple-200">
+                  🗣️ {selected.voicePersonaName ?? 'Voice Persona'}
+                  <button
+                    type="button"
+                    onClick={() => removeChip('voicePersonaId')}
+                    className="rounded-full bg-purple-500/30 p-1 hover:bg-purple-500/40"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              )}
+              {selected.imageFile && (
+                <span className="inline-flex items-center gap-2 rounded-full bg-emerald-500/20 px-3 py-1 text-sm text-emerald-200">
+                  🖼️ {selected.imageFile.name}
+              {isUploadingImage && (
+                <span className="text-xs text-emerald-100/70">Uploading…</span>
+              )}
+                  <button
+                    type="button"
+                    onClick={() => removeChip('imageFile')}
+                    className="rounded-full bg-emerald-500/30 p-1 hover:bg-emerald-500/40"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              )}
+            </div>
+            {messages.length > 0 && (
+              <div className="mb-6 space-y-4">
+                {messages.map((message) => (
                   <div
-                    className={`max-w-[80%] rounded-lg px-4 py-3 ${
-                      msg.role === 'user'
-                        ? 'bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white'
-                        : 'glass text-gray-300 border border-white/10'
+                    key={message.id}
+                    className={`rounded-xl border border-white/10 p-4 ${
+                      message.role === 'user'
+                        ? 'bg-white/5'
+                        : 'bg-gradient-to-br from-white/5 via-black/40 to-black/70'
                     }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                    <p className="text-xs opacity-70 mt-1">
-                      {msg.timestamp.toLocaleTimeString()}
+                    <p className="text-sm text-gray-300">{message.text}</p>
+                    {message.videoUrl && (!hasGenerated || !videoUrl || message.videoUrl !== videoUrl) && (
+                      <div className="mt-3 w-full rounded-xl border border-white/10 bg-black/70">
+                        <VideoPlayerWithAudio
+                          videoUrl={message.videoUrl}
+                          poster={generatedImageUrl || "/images/video-studio-poster.jpg"}
+                          hasAudio={message.audioMerged ?? false}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {errorMessage && (
+              <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {errorMessage}
+              </div>
+            )}
+            <div className="relative rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.05)] focus-within:border-white/20 focus-within:ring-2 focus-within:ring-[#7c3aed]/40 focus-within:shadow-[0_0_45px_rgba(124,58,237,0.25),0_0_90px_rgba(59,130,246,0.18)]">
+              {!isGenerating && !hasGenerated && (
+                <button
+                  type="button"
+                  onClick={() => setIsMenuOpen(prev => !prev)}
+                  className="absolute left-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"
+                >
+                  <Plus className="h-5 w-5" />
+                </button>
+              )}
+
+              {!isGenerating && !hasGenerated && (
+                <>
+                  <textarea
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    placeholder="Describe your video idea..."
+                    rows={5}
+                    className="w-full resize-none bg-transparent pl-16 pr-4 text-base text-white outline-none placeholder:text-gray-500"
+                  />
+                  <div className="relative mt-4">
+                    <textarea
+                      value={dialogueText}
+                      onChange={(event) => setDialogueText(event.target.value)}
+                      placeholder="Diyalog (isteğe bağlı)..."
+                      rows={3}
+                      className="w-full resize-none rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none placeholder:text-gray-500 focus:border-white/20"
+                    />
+                    {dialogueText.trim().length > 0 && (
+                      <span className="absolute right-3 top-3 rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] font-semibold text-emerald-200">
+                        🗣️ Konuşma Modu Aktif
+                      </span>
+                    )}
+                    <p className="mt-2 text-xs text-gray-400">
+                      ℹ️ İpucu: Metin girerseniz karakter konuşur (Lip-Sync). Boş bırakırsanız sinematik video üretilir.
                     </p>
                   </div>
-                </div>
-              ))}
-              <div ref={chatEndRef} />
-            </div>
 
-            {/* Chat Input */}
-            <form onSubmit={handleChatSubmit} className="flex gap-2">
-              <textarea
-                ref={chatInputRef}
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleChatSubmit();
-                  }
-                }}
-                placeholder={
-                  generationMode === 'text-only'
-                    ? 'Describe your video: "A futuristic city at sunset with flying cars, cinematic camera movement, dramatic lighting, smooth transitions, epic music mood..."'
-                    : imageSequence.length > 0
-                    ? 'Reference images: "Image 1: character walking, Image 2: car following. Camera pans slowly. Add dramatic lighting. Smooth transition between scenes..."'
-                    : 'Upload images below first, or switch to text-only mode. Describe camera movements (pan, zoom, rotate), lighting (dramatic, soft, neon), transitions (smooth, quick), character actions, and mood...'
-                }
-                disabled={isGenerating}
-                rows={3}
-                className="flex-1 glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none placeholder-gray-500 resize-none"
-              />
-              <button
-                type="submit"
-                disabled={isGenerating || !chatInput.trim()}
-                className="px-6 py-3 bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold rounded-lg hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <span>🚀</span>
-                <span>Generate</span>
-              </button>
-            </form>
-
-            {generationMode === 'images' && imageSequence.length === 0 && (
-              <p className="text-xs text-blue-400 mt-2 text-center">
-                💡 Tip: Upload images below to reference them, or switch to text-only mode to generate videos purely from text descriptions
-              </p>
-            )}
-          </div>
-
-          {/* Image Sequence Upload - Only show when mode is 'images' */}
-          {generationMode === 'images' && (
-            <div className="glass rounded-2xl p-8 mb-8">
-              <h2 className="text-2xl font-semibold text-white mb-4">Upload Images (Optional)</h2>
-              <p className="text-gray-400 mb-4">
-                Upload images to reference in your chat. Drag to reorder. You can reference them as "Image 1", "Image 2", etc. in your chat.
-              </p>
-
-            {/* Image Upload Input */}
-            <div className="mb-6">
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={handleImageUpload}
-                disabled={isGenerating}
-                className="hidden"
-                id="video-image-upload"
-              />
-              <label
-                htmlFor="video-image-upload"
-                className={`inline-flex items-center gap-2 rounded-lg px-6 py-3 text-white font-medium border border-[#00d9ff]/30 cursor-pointer transition-all hover:bg-[#00d9ff]/10 ${
-                  isGenerating ? 'opacity-50 cursor-not-allowed' : ''
-                }`}
-              >
-                <Camera className="w-4 h-4 inline mr-2" /> Upload Images (Multiple)
-              </label>
-              <p className="text-xs text-gray-400 mt-2">
-                Upload images to reference in your chat. Reference them as "Image 1", "Image 2", etc. in your chat commands. Images are optional - you can also generate videos purely from text.
-              </p>
-            </div>
-
-            {/* Image Sequence with Drag-and-Drop */}
-            {imageSequence.length > 0 && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold text-white">
-                  Image Sequence ({imageSequence.length} images)
-                </h3>
-                <p className="text-xs text-gray-400 mb-4">
-                  Drag images to reorder. Add descriptions for each image to define the narrative.
-                </p>
-
-                {imageSequence
-                  .sort((a, b) => a.order - b.order)
-                  .map((img, index) => (
-                    <div
-                      key={img.id}
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, img.id)}
-                      onDragOver={handleDragOver}
-                      onDrop={(e) => handleDrop(e, img.id)}
-                      onDragEnd={handleDragEnd}
-                      className={`glass rounded-lg p-4 border-2 transition-all cursor-move ${
-                        (() => {
-                          const sorted = [...imageSequence].sort((a, b) => a.order - b.order);
-                          const sortedIndex = sorted.findIndex(i => i.id === img.id);
-                          return draggedIndex === sortedIndex;
-                        })()
-                          ? 'border-[#00d9ff] opacity-50 bg-[#00d9ff]/10'
-                          : 'border-white/10 hover:border-[#00d9ff]/30'
-                      }`}
+                  <div className="mt-4 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleGenerate}
+                      disabled={
+                        prompt.trim() === ''
+                        || isUploadingImage
+                        || (selected.imageFile && !uploadedImageUrl)
+                      }
+                      className="rounded-xl bg-gradient-to-r from-[#00d9ff] to-[#0099cc] px-6 py-3 text-sm font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <div className="flex gap-4 items-start">
-                        {/* Image Preview */}
-                        <div className="relative flex-shrink-0">
-                          <div className="absolute -top-2 -left-2 w-8 h-8 rounded-full bg-[#00d9ff] text-black font-bold flex items-center justify-center text-sm">
-                            {img.order + 1}
+                      Generate Video
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {isGenerating && (
+                <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-white/10 bg-gradient-to-br from-white/5 via-black/40 to-black/70 px-6 py-10">
+                  <div className="aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-black/60 shadow-[0_0_35px_rgba(255,255,255,0.06)]">
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-3 animate-pulse">
+                      <Loader2 className="h-6 w-6 animate-spin text-white/70" />
+                      <p className="text-sm text-gray-300">{statusMessage}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!isGenerating && hasGenerated && videoUrl && (
+                <div className="flex flex-col gap-4">
+                  <div className="w-full rounded-xl border border-white/10 bg-black/70 shadow-[0_0_35px_rgba(255,255,255,0.06)]">
+                    <VideoPlayerWithAudio
+                      videoUrl={videoUrl}
+                      poster={generatedImageUrl || "/images/video-studio-poster.jpg"}
+                      hasAudio={audioMerged}
+                    />
+                  </div>
+                  <p className="text-sm text-gray-400">Video Created</p>
+                </div>
+              )}
+
+              {isMenuOpen && (
+                <div className="absolute left-4 top-16 z-10 w-72 rounded-xl border border-white/10 bg-[#0b0b0b] shadow-xl">
+                  <div className="p-3 text-xs uppercase tracking-wide text-gray-500">
+                    Add assets
+                  </div>
+                  <div className="border-t border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => {}}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5"
+                    >
+                      👤 Select Visual Persona
+                    </button>
+                    <div className="px-4 pb-3">
+                      <div className="max-h-[320px] overflow-y-auto rounded-lg border border-white/10 bg-black/40">
+                        {succeededPersonas.length === 0 && trainingPersonas.length === 0 && (
+                          <p className="p-3 text-xs text-gray-500">No personas found.</p>
+                        )}
+                        {succeededPersonas.map((option) => (
+                          <div
+                            key={option.id || option.modelId || Math.random()}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              handleSelectPersona(option);
+                            }}
+                            className={`relative cursor-pointer transition-all duration-200 p-2 rounded-xl border-2 ${
+                              (selectedIdRef.current === (option.id || option.modelId)
+                                || selected.selectedPersona?.id === (option.id || option.modelId))
+                                ? 'border-blue-500 bg-blue-500/10 shadow-[0_0_15px_rgba(59,130,246,0.5)]'
+                                : 'border-transparent hover:border-white/20'
+                            }`}
+                          >
+                            <div className="flex w-full items-center gap-3 text-left text-sm text-white">
+                              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500/80 to-sky-500/80 text-[10px] font-semibold text-white">
+                                {option.name.trim().charAt(0).toUpperCase() || 'P'}
+                              </span>
+                              <span className="truncate">{option.name}</span>
+                            </div>
+                            <div className="absolute bottom-0 left-0 right-0 bg-black/80 p-1 text-[8px] text-green-400 font-mono break-all z-20">
+                              ID: {option.model_id || option.training_id || 'YOK'}
+                            </div>
                           </div>
-                          <img
-                            src={img.preview}
-                            alt={`Frame ${img.order + 1}`}
-                            className="w-32 h-32 object-cover rounded-lg"
-                          />
-                        </div>
-
-                        {/* Description Input */}
-                        <div className="flex-1">
-                          <label className="block text-sm font-medium text-gray-300 mb-2">
-                            Image {img.order + 1} - Action/Transition:
-                          </label>
-                          <input
-                            type="text"
-                            value={img.description}
-                            onChange={(e) => updateImageDescription(img.id, e.target.value)}
-                            placeholder={`e.g., character walking, car approaching, explosion, transition to...`}
-                            disabled={isGenerating}
-                            className="w-full glass rounded-lg px-4 py-2 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none placeholder-gray-500"
-                          />
-                          <p className="text-xs text-gray-400 mt-1">
-                            Optional: Describe what happens in this image (e.g., "character walking"). Reference as "Image {img.order + 1}" in your chat.
-                          </p>
-                        </div>
-
-                        {/* Remove Button */}
-                        <button
-                          onClick={() => removeImage(img.id)}
-                          disabled={isGenerating}
-                          className="flex-shrink-0 w-8 h-8 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30 flex items-center justify-center transition-all disabled:opacity-50"
-                        >
-                          ×
-                        </button>
+                        ))}
+                        {trainingPersonas.length > 0 && (
+                          <div className="border-t border-white/10 px-3 py-2 text-[11px] uppercase tracking-wide text-gray-500">
+                            Training
+                          </div>
+                        )}
+                        {trainingPersonas.map((option) => (
+                          <div
+                            key={option.id}
+                            className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-gray-500 opacity-70"
+                          >
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[10px] font-semibold text-white/60">
+                              {option.name.trim().charAt(0).toUpperCase() || 'P'}
+                            </span>
+                            <span className="truncate">{option.name}</span>
+                            <span className="ml-auto text-[10px] uppercase text-white/40">
+                              {option.status || 'training'}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  ))}
-              </div>
-            )}
-          </div>
-          )}
+                  </div>
 
-          {/* Generation Progress */}
-          {isGenerating && (
-            <div className="glass rounded-2xl p-8 mb-8">
-              <h2 className="text-2xl font-semibold text-white mb-4">Generation Progress</h2>
-              
-              <div className="mb-4">
-                <div className="flex justify-between text-sm text-gray-400 mb-2">
-                  <span>{generationStatus}</span>
-                  <span>{Math.round(generationProgress)}%</span>
-                </div>
-                <div className="w-full bg-gray-800 rounded-full h-4 overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-[#00d9ff] to-[#0099cc] transition-all duration-500"
-                    style={{ width: `${generationProgress}%` }}
-                  />
-                </div>
-              </div>
+                  <div className="border-t border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => {}}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5"
+                    >
+                      🗣️ Select Voice Persona
+                    </button>
+                    <div className="px-4 pb-3">
+                      <div className="max-h-32 overflow-auto rounded-lg border border-white/10 bg-black/40">
+                        {voiceOptions.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() => handleSelectVoice(option)}
+                            className="block w-full px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                          >
+                            {option.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
 
-              {videoId && (
-                <p className="text-xs text-gray-500 mt-4">
-                  Video ID: {videoId}
-                </p>
+                  <div className="border-t border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-white hover:bg-white/5"
+                    >
+                      <ImagePlus className="h-4 w-4 text-gray-400" />
+                      Upload Image
+                    </button>
+                  </div>
+                </div>
               )}
-            </div>
-          )}
 
-          {/* Video Result */}
-          {videoUrl && (
-            <div className="glass rounded-2xl p-8 mb-8">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-2xl font-semibold text-white">Generated Video</h2>
-                <button
-                  onClick={downloadVideo}
-                  className="flex items-center gap-2 rounded-lg bg-[#00d9ff]/10 px-4 py-2 text-sm font-medium text-[#00d9ff] transition-all hover:bg-[#00d9ff]/20"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-                    />
-                  </svg>
-                  Download Video
-                </button>
-              </div>
-              
-              <div className="rounded-lg overflow-hidden bg-black">
-                <video
-                  src={videoUrl}
-                  controls
-                  className="w-full max-h-[600px]"
-                  autoPlay
-                  loop
-                >
-                  Your browser does not support the video tag.
-                </video>
-              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => handleImagePick(event.target.files?.[0] ?? null)}
+              />
             </div>
-          )}
+          </section>
 
-          {/* Info Section */}
-          <div className="glass rounded-2xl p-8">
-            <h2 className="text-2xl font-semibold text-white mb-4">How It Works</h2>
-            <div className="space-y-4 text-gray-400">
-              <div className="flex gap-4">
-                <span className="text-2xl">1️⃣</span>
+          <footer className="mt-16 border-t border-white/5 pt-8 text-gray-500">
+            <div className="grid gap-4 text-sm md:grid-cols-3">
+              <div className="flex items-start gap-3">
+                <Sparkles className="mt-1 h-4 w-4" />
                 <div>
-                  <h3 className="text-white font-medium mb-1">Upload Image Sequence</h3>
-                  <p>Upload multiple images that will form your video sequence. Drag images to reorder them.</p>
+                  <p className="text-gray-300">Describe your scene</p>
+                  <p className="text-xs text-gray-500">Write a cinematic prompt.</p>
                 </div>
               </div>
-              <div className="flex gap-4">
-                <span className="text-2xl">2️⃣</span>
+              <div className="flex items-start gap-3">
+                <Video className="mt-1 h-4 w-4" />
                 <div>
-                  <h3 className="text-white font-medium mb-1">Describe Each Frame</h3>
-                  <p>Add descriptions for each image (e.g., "character walking", "car approaching", "explosion").</p>
+                  <p className="text-gray-300">Add personas or references</p>
+                  <p className="text-xs text-gray-500">Attach identities or a guide image.</p>
                 </div>
               </div>
-              <div className="flex gap-4">
-                <span className="text-2xl">3️⃣</span>
+              <div className="flex items-start gap-3">
+                <Sparkles className="mt-1 h-4 w-4" />
                 <div>
-                  <h3 className="text-white font-medium mb-1">Generate & Download</h3>
-                  <p>AI creates a cohesive video narrative from your image sequence. Download when ready!</p>
+                  <p className="text-gray-300">Generate and iterate</p>
+                  <p className="text-xs text-gray-500">Preview and refine fast.</p>
                 </div>
               </div>
             </div>
-          </div>
+          </footer>
         </div>
       </main>
 

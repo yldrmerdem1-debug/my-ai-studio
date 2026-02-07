@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
-import JSZip from 'jszip';
-import { Sparkles, Camera, Target, Mic, Lock } from 'lucide-react';
+import { Sparkles, Camera, Target, Mic, Lock, Pencil, Trash2 } from 'lucide-react';
 import { usePersona } from '@/hooks/usePersona';
+import { usePersonas } from '@/hooks/usePersonas';
 import { canTrainVisualPersona, canTrainVoicePersona } from '@/lib/subscription';
 
 export default function PersonaPage() {
@@ -14,15 +14,39 @@ export default function PersonaPage() {
   const [isTraining, setIsTraining] = useState(false);
   const [trainingProgress, setTrainingProgress] = useState<number>(0);
   const [trainingStatus, setTrainingStatus] = useState<string>('');
+  const [isTrainingIndeterminate, setIsTrainingIndeterminate] = useState(false);
+  const [trainingError, setTrainingError] = useState<string | null>(null);
+  const [isUploadingImages, setIsUploadingImages] = useState(false);
+  const [personaName, setPersonaName] = useState('');
   const [triggerWord, setTriggerWord] = useState<string>('');
   const [trainingId, setTrainingId] = useState<string>('');
   const [isTrainingComplete, setIsTrainingComplete] = useState(false);
   const [completedModelId, setCompletedModelId] = useState<string | null>(null);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const zipInputRef = useRef<HTMLInputElement>(null);
   const voiceInputRef = useRef<HTMLInputElement>(null);
-  const { user, persona, requestVisualPersona, requestVoicePersona, setVisualStatus, setVoiceStatus } = usePersona();
+  const [trainedPersonas, setTrainedPersonas] = useState<Array<{
+    dbId?: string | null;
+    personaKey: string;
+    id: string;
+    status: 'idle' | 'training' | 'trained' | 'failed';
+    dbStatus: 'idle' | 'training' | 'completed' | 'failed';
+    createdAt?: string | null;
+    name?: string | null;
+    type?: 'visual' | 'voice';
+    progress?: number | null;
+  }>>([]);
+  const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(null);
+  const [isRenameOpen, setIsRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameTargetId, setRenameTargetId] = useState<string | null>(null);
+  const { user, persona, requestVisualPersona, requestVoicePersona, setVisualStatus, setVoiceStatus, setPersonaStatus, setIsPremiumUser } = usePersona();
+  const {
+    personas: dbPersonas,
+    isLoading: isLoadingPersonas,
+    error: personasError,
+    refresh: refreshPersonas,
+  } = usePersonas(user?.id);
   const canTrainVisual = canTrainVisualPersona(user);
   const canTrainVoice = canTrainVoicePersona(user);
   const visualStatus = persona?.visualStatus ?? 'none';
@@ -30,12 +54,206 @@ export default function PersonaPage() {
   const [voiceFiles, setVoiceFiles] = useState<File[]>([]);
   const [voiceDurationSec, setVoiceDurationSec] = useState<number>(0);
   const [isVoiceTraining, setIsVoiceTraining] = useState(false);
+  const FORCE_PREMIUM_PREVIEW = true;
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleCancelTraining = async (personaKey: string, dbId?: string | null) => {
+    if (!window.confirm('Bu eğitimi iptal etmek istediğinize emin misiniz?')) return;
+
+    try {
+      // TODO: Call backend API to cancel the training on Replicate
+      // await cancelTrainingAction(dbId);
+      console.log(`Canceling training for: ${personaKey} (ID: ${dbId ?? 'n/a'})`);
+      await fetch(`/api/persona/training-status?id=${encodeURIComponent(personaKey)}`, {
+        method: 'POST',
+      });
+      setIsTraining(false);
+      setIsTrainingIndeterminate(false);
+      setTrainingStatus('Eğitim iptal edildi');
+    } catch (error) {
+      console.error('Cancel failed:', error);
+    } finally {
+      setTrainedPersonas(prev => prev.map(item => (
+        item.personaKey === personaKey
+          ? { ...item, status: 'failed', dbStatus: 'failed', progress: null }
+          : item
+      )));
+    }
+  };
+
+  useEffect(() => {
+    if (FORCE_PREMIUM_PREVIEW) {
+      setIsPremiumUser(true);
+    }
+  }, [setIsPremiumUser]);
+
+  useEffect(() => {
+    if (!isRenameOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeRenameModal();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isRenameOpen]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = localStorage.getItem('selectedPersonaTrainingId');
+    if (stored) {
+      setSelectedPersonaId(stored);
+      const storedTriggerMap = localStorage.getItem('personaTriggerWords');
+      if (storedTriggerMap) {
+        try {
+          const triggerMap = JSON.parse(storedTriggerMap);
+          setTriggerWord(triggerMap?.[stored] ?? '');
+        } catch (error) {
+          console.error('Failed to parse persona trigger words:', error);
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (selectedPersonaId) {
+      localStorage.setItem('selectedPersonaTrainingId', selectedPersonaId);
+    } else {
+      localStorage.removeItem('selectedPersonaTrainingId');
+    }
+  }, [selectedPersonaId]);
+
+  useEffect(() => {
+    if (!dbPersonas.length) {
+      return;
+    }
+    const deletedIds = getDeletedPersonaIds();
+    const nameMap = getPersonaNames();
+    const next = dbPersonas
+      .filter(item => item.dbStatus === 'training' || !deletedIds.has(item.personaKey))
+      .map(item => ({
+        dbId: item.dbId ?? null,
+        personaKey: item.personaKey,
+        id: item.personaKey,
+        status: item.status,
+        dbStatus: item.dbStatus,
+        createdAt: item.createdAt,
+        name: item.name ?? nameMap?.[item.personaKey] ?? null,
+        type: item.type ?? 'visual',
+        progress: item.progress ?? null,
+      }));
+    setTrainedPersonas(next);
+  }, [dbPersonas]);
+
+  const activeTraining = trainedPersonas.find(item => item.status === 'training') ?? null;
+
+  useEffect(() => {
+    if (!activeTraining) return;
+    setIsTraining(true);
+    setIsTrainingComplete(false);
+    setTrainingError(null);
+    setTrainingStatus('Persona eğitiliyor');
+    if (typeof activeTraining.progress === 'number') {
+      setIsTrainingIndeterminate(false);
+      setTrainingProgress(activeTraining.progress);
+    } else {
+      setIsTrainingIndeterminate(true);
+    }
+  }, [activeTraining]);
+  const getDeletedPersonaIds = () => {
+    if (typeof window === 'undefined') return new Set<string>();
+    const raw = localStorage.getItem('deleted_person_ids');
+    if (!raw) return new Set<string>();
+    try {
+      const parsed = JSON.parse(raw);
+      return new Set<string>(Array.isArray(parsed) ? parsed : []);
+    } catch (error) {
+      console.error('Failed to parse deleted personas:', error);
+      return new Set<string>();
+    }
+  };
+
+  const persistDeletedPersonaIds = (ids: Set<string>) => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem('deleted_person_ids', JSON.stringify(Array.from(ids)));
+  };
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
+
+  const formatPersonaDate = (value?: string | null) => {
+    if (!value) return 'Unknown';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Unknown';
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const getPersonaNames = () => {
+    if (typeof window === 'undefined') return {};
+    const raw = localStorage.getItem('persona_names');
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      console.error('Failed to parse persona names:', error);
+      return {};
+    }
+  };
+
+  const persistPersonaNames = (names: Record<string, string>) => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem('persona_names', JSON.stringify(names));
+  };
+
+  const openRenameModal = (id: string, currentName?: string | null) => {
+    setRenameTargetId(id);
+    setRenameValue(currentName?.trim() ? currentName : '');
+    setIsRenameOpen(true);
+  };
+
+  const closeRenameModal = () => {
+    setIsRenameOpen(false);
+    setRenameValue('');
+    setRenameTargetId(null);
+  };
+
+  const saveRename = () => {
+    if (!renameTargetId) {
+      closeRenameModal();
+      return;
+    }
+    const nameMap = getPersonaNames();
+    nameMap[renameTargetId] = renameValue.trim() || 'Untitled Persona';
+    persistPersonaNames(nameMap);
+    setTrainedPersonas(prev => prev.map(item => (
+      item.id === renameTargetId
+        ? { ...item, name: nameMap[renameTargetId] }
+        : item
+    )));
+    fetch('/api/save-persona', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        personaId: renameTargetId,
+        name: nameMap[renameTargetId],
+        user,
+      }),
+    }).catch((error) => {
+      console.error('Failed to save persona name:', error);
+    });
+    closeRenameModal();
+  };
+
+  const personaList = trainedPersonas;
 
   const calculateTotalDuration = async (files: File[]): Promise<number> => {
     const durations = await Promise.all(files.map(file => {
@@ -73,53 +291,6 @@ export default function PersonaPage() {
     setUploadedFiles(prev => [...prev, ...imageFiles]);
   };
 
-  const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!canTrainVisual) {
-      setIsPricingModalOpen(true);
-      alert('Premium plan required to upload photos for persona training.');
-      return;
-    }
-    const file = e.target.files?.[0];
-    if (!file || !file.name.endsWith('.zip')) {
-      alert('Please upload a ZIP file');
-      return;
-    }
-
-    try {
-      const zip = new JSZip();
-      const zipData = await zip.loadAsync(file);
-      
-      const imageFiles: File[] = [];
-      let imageCount = 0;
-
-      // Extract images from ZIP
-      for (const [filename, zipEntry] of Object.entries(zipData.files)) {
-        if (!zipEntry.dir && /\.(jpg|jpeg|png|webp)$/i.test(filename)) {
-          if (imageCount >= 20) {
-            alert('Maximum 20 images allowed. Only the first 20 will be used.');
-            break;
-          }
-          
-          const blob = await zipEntry.async('blob');
-          const file = new File([blob], filename, { type: blob.type });
-          imageFiles.push(file);
-          imageCount++;
-        }
-      }
-
-      if (imageFiles.length < 20) {
-        alert(`ZIP file contains only ${imageFiles.length} images. Exactly 20 images are required.`);
-        return;
-      }
-
-      setUploadedFiles(imageFiles);
-      alert(`Successfully extracted ${imageFiles.length} images from ZIP file.`);
-    } catch (error) {
-      console.error('ZIP extraction error:', error);
-      alert('Failed to extract images from ZIP file. Please try again.');
-    }
-  };
-
   const handleVoiceSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!canTrainVoice) {
       setIsPricingModalOpen(true);
@@ -151,39 +322,121 @@ export default function PersonaPage() {
     return `${randomAdj}${randomNoun}${randomNum}`;
   };
 
-  const createZipFromFiles = async (files: File[]): Promise<Blob> => {
-    const zip = new JSZip();
-    
-    console.log(`Creating ZIP file from ${files.length} images...`);
-    
-    // Add all image files to ZIP with proper naming
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        // Use a simple, clean naming scheme: image_001.jpg, image_002.jpg, etc.
-        // This ensures compatibility with fast-flux-trainer
-        const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
-        const filename = `image_${String(i + 1).padStart(3, '0')}.${extension}`;
-        zip.file(filename, arrayBuffer);
-        console.log(`Added ${filename} to ZIP`);
-      } catch (error) {
-        console.error(`Failed to add file ${file.name} to ZIP:`, error);
-        throw new Error(`Failed to process image ${i + 1}: ${file.name}`);
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  }, []);
+
+  const applyTrainingStatus = useCallback((status: string, errorMessage?: string | null, personaId?: string | null) => {
+    if (status === 'completed') {
+      stopPolling();
+      setTrainingProgress(100);
+      setTrainingStatus('Successful');
+      setIsTrainingIndeterminate(false);
+      setIsTraining(false);
+      setVisualStatus('ready');
+      setPersonaStatus('completed');
+      setIsTrainingComplete(true);
+      setTrainingError(null);
+      if (personaId) {
+        setTrainedPersonas(prev => prev.map(item => (
+          item.id === personaId ? { ...item, dbStatus: 'completed', status: 'trained', progress: 100 } : item
+        )));
       }
+      refreshPersonas();
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('personasUpdated', String(Date.now()));
+        window.dispatchEvent(new CustomEvent('personas:updated'));
+      }
+      return;
     }
 
-    // Generate ZIP file with compression
-    console.log('Generating ZIP file...');
-    const zipBlob = await zip.generateAsync({ 
-      type: 'blob',
-      compression: 'DEFLATE',
-      compressionOptions: { level: 6 } // Balanced compression
-    });
-    
-    console.log(`ZIP file created successfully (${(zipBlob.size / 1024 / 1024).toFixed(2)} MB)`);
-    return zipBlob;
-  };
+    if (status === 'failed') {
+      stopPolling();
+      const message = errorMessage || '';
+      setTrainingStatus(message);
+      setTrainingError(message || null);
+      setIsTrainingIndeterminate(false);
+      setIsTraining(false);
+      setVisualStatus('none');
+      setPersonaStatus('failed');
+      if (personaId) {
+        setTrainedPersonas(prev => prev.map(item => (
+          item.id === personaId ? { ...item, dbStatus: 'failed', status: 'failed', progress: null } : item
+        )));
+      }
+      refreshPersonas();
+      return;
+    }
+
+    setIsTraining(true);
+    setIsTrainingIndeterminate(true);
+    setTrainingStatus('Persona eğitiliyor');
+    setTrainingError(null);
+  }, [refreshPersonas, setPersonaStatus, setVisualStatus, stopPolling]);
+
+  const fetchTrainingStatus = useCallback(async (personaId: string) => {
+    try {
+      const response = await fetch(`/api/persona/${personaId}/training-status`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 404) {
+          return { status: 'training', progress: null, error: 'not_found' };
+        }
+        return { status: 'failed' };
+      }
+      return data;
+    } catch {
+      return { status: 'training', progress: null };
+    }
+  }, []);
+
+  const startPolling = useCallback((personaId: string) => {
+    if (pollingRef.current) return;
+    pollingRef.current = setInterval(async () => {
+      try {
+        const data = await fetchTrainingStatus(personaId);
+        if (data?.error === 'not_found') {
+          stopPolling();
+          setSelectedPersonaId(null);
+          return;
+        }
+        applyTrainingStatus(data.status, data.error, personaId);
+      } catch (error: any) {
+        console.error('Polling error:', error);
+      }
+    }, 5000);
+  }, [applyTrainingStatus, fetchTrainingStatus]);
+
+  useEffect(() => {
+    if (!selectedPersonaId) return;
+    let isActive = true;
+    const checkStatus = async () => {
+      try {
+        const data = await fetchTrainingStatus(selectedPersonaId);
+        if (!isActive) return;
+        if (data?.error === 'not_found') {
+          stopPolling();
+          setSelectedPersonaId(null);
+          return;
+        }
+        applyTrainingStatus(data.status, data.error, selectedPersonaId);
+        if (data.status === 'training') {
+          startPolling(selectedPersonaId);
+        }
+      } catch (error: any) {
+        if (!isActive) return;
+        console.error('Failed to load persona status:', error);
+      }
+    };
+    checkStatus();
+    return () => {
+      isActive = false;
+      stopPolling();
+    };
+  }, [applyTrainingStatus, fetchTrainingStatus, selectedPersonaId, startPolling, stopPolling]);
 
   const startTraining = async () => {
     if (!canTrainVisual) {
@@ -202,6 +455,11 @@ export default function PersonaPage() {
       return;
     }
 
+    if (!personaName.trim()) {
+      alert('Please enter a persona name before training.');
+      return;
+    }
+
     const personaRequest = requestVisualPersona(uploadedFiles.length);
     if (!personaRequest.ok) {
       if (personaRequest.reason === 'premium_required') {
@@ -216,71 +474,147 @@ export default function PersonaPage() {
     setIsTraining(true);
     setTrainingProgress(0);
     setTrainingStatus('Preparing training data...');
+    setTrainingError(null);
     const newTriggerWord = generateTriggerWord();
     setTriggerWord(newTriggerWord);
     const personaId = personaRequest.personaId ?? persona?.id;
 
     try {
-      setTrainingStatus(`Creating ZIP file from ${uploadedFiles.length} images...`);
+      setTrainingStatus('Uploading images to training service...');
       setTrainingProgress(10);
 
-      // Automatically create ZIP file from uploaded images (invisible to user)
-      // This provides a premium, seamless experience
-      const zipBlob = await createZipFromFiles(uploadedFiles);
-      
-      setTrainingStatus('Preparing ZIP for upload...');
-      setTrainingProgress(15);
-      
-      // Convert ZIP to base64 data URL for API transmission
-      // This format is compatible with Replicate's fast-flux-trainer
-      const zipBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(zipBlob);
-        reader.onload = () => {
-          const result = reader.result as string;
-          console.log('ZIP converted to base64, size:', result.length, 'characters');
-          resolve(result);
-        };
-        reader.onerror = (error) => {
-          console.error('Failed to convert ZIP to base64:', error);
-          reject(new Error('Failed to prepare ZIP file for upload'));
-        };
+      const formData = new FormData();
+      uploadedFiles.forEach((file) => {
+        formData.append('images', file, file.name);
       });
+      formData.append('personaName', personaName.trim());
 
-      setTrainingStatus('Uploading ZIP to training service...');
-      setTrainingProgress(20);
-
-      // Call training API with ZIP file
-      const response = await fetch('/api/train-persona', {
+      setIsUploadingImages(true);
+      const response = await fetch('/api/train', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          zipFile: zipBase64,
-          triggerWord: newTriggerWord,
-          imageCount: uploadedFiles.length,
-          user,
-          personaId,
-        }),
+        body: formData,
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Training failed');
+        setIsUploadingImages(false);
+        let rawText = '';
+        let error: any = null;
+        try {
+          rawText = await response.text();
+          console.error('Start training raw error:', rawText);
+          try {
+            error = rawText ? JSON.parse(rawText) : null;
+          } catch {
+            error = null;
+          }
+        } catch (parseError) {
+          console.error('Failed to read error response body:', parseError);
+        }
+        console.error('Start training failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          error,
+          rawText,
+        });
+        const isEmptyError = !error || Object.keys(error).length === 0;
+        const fallbackByStatus: Record<number, string> = {
+          400: 'Eksik veya hatalı istek (Kod: 400)',
+          401: 'Yetkisiz istek (Kod: 401)',
+          403: 'Erişim reddedildi (Kod: 403)',
+          404: 'Kaynak bulunamadı (Kod: 404)',
+          413: 'Dosya çok büyük (Kod: 413)',
+          500: 'Sunucu hatası (Kod: 500)',
+          502: 'Sunucu geçici olarak erişilemiyor (Kod: 502)',
+          503: 'Servis kullanılamıyor (Kod: 503)',
+        };
+        const statusFallback = fallbackByStatus[response.status] || `Sunucu hatası (Kod: ${response.status})`;
+        const safeMessage = (error as any)?.error || rawText || statusFallback;
+        setTrainingError(safeMessage);
+        setIsTraining(false);
+        setTrainingProgress(0);
+        setTrainingStatus('');
+        return;
       }
 
       const data = await response.json();
-      setTrainingId(data.trainingId);
-      setTrainingStatus('Training started! Monitoring progress...');
+      setIsUploadingImages(false);
+      const uploadedImageUrl = data.inputImagesUrl ?? '';
+      if (!uploadedImageUrl) {
+        alert('Lütfen önce resmin yüklenmesini bekleyin!');
+        setIsTraining(false);
+        setTrainingProgress(0);
+        setTrainingStatus('');
+        return;
+      }
+      setTrainingId(data.trainingId ?? '');
+      setTrainingStatus('Persona eğitiliyor');
+      setIsTrainingIndeterminate(true);
       setTrainingProgress(40);
+      if (data.trainingId && typeof window !== 'undefined') {
+        setSelectedPersonaId(data.trainingId);
+        localStorage.setItem('selectedPersonaTrainingId', data.trainingId);
+        const stored = localStorage.getItem('personaTriggerWords');
+        const map = stored ? JSON.parse(stored) : {};
+        map[data.trainingId] = newTriggerWord;
+        localStorage.setItem('personaTriggerWords', JSON.stringify(map));
+        const storedNames = localStorage.getItem('persona_names');
+        const nameMap = storedNames ? JSON.parse(storedNames) : {};
+        nameMap[data.trainingId] = personaName.trim();
+        localStorage.setItem('persona_names', JSON.stringify(nameMap));
+      }
 
-      // Poll for training status
-      pollTrainingStatus(data.trainingId);
+      if (data.trainingId) {
+        fetch('/api/save-persona', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            personaId: data.trainingId,
+            name: personaName.trim(),
+            triggerWord: newTriggerWord,
+            modelId: data.trainingId,
+            trainingId: data.trainingId,
+            image_url: uploadedImageUrl,
+            imageUrl: uploadedImageUrl,
+            createdAt: new Date().toISOString(),
+            status: 'training',
+            visualStatus: 'training',
+            user,
+          }),
+        }).catch((error) => {
+          console.error('Failed to save persona record:', error);
+        });
+      }
+
+      if (data.trainingId) {
+        setTrainedPersonas(prev => {
+          const exists = prev.some(item => item.personaKey === data.trainingId);
+          if (exists) return prev;
+          return [
+            {
+              dbId: null,
+              personaKey: data.trainingId,
+              id: data.trainingId,
+              status: 'training',
+              dbStatus: 'training',
+              createdAt: new Date().toISOString(),
+              name: personaName.trim(),
+              type: 'visual',
+              progress: 0,
+            },
+            ...prev,
+          ];
+        });
+      }
+
+      if (personaId) {
+        setSelectedPersonaId(personaId);
+        startPolling(personaId);
+      }
 
     } catch (error: any) {
       console.error('Training error:', error);
-      alert(`Training failed: ${error.message}`);
+      alert(error.message || 'Training error');
+      setIsUploadingImages(false);
       setIsTraining(false);
       setTrainingProgress(0);
       setTrainingStatus('');
@@ -329,113 +663,6 @@ export default function PersonaPage() {
     }, 3000);
   };
 
-  const pollTrainingStatus = async (id: string) => {
-    const maxAttempts = 120; // 10 minutes max (5 second intervals)
-    let attempts = 0;
-
-    const poll = async () => {
-      try {
-        const response = await fetch(`/api/train-persona/status?id=${id}`);
-        const data = await response.json();
-
-        if (data.status === 'succeeded') {
-          setTrainingProgress(100);
-          setTrainingStatus('Training complete! Your AI persona is ready.');
-          setIsTraining(false);
-          setVisualStatus('ready');
-          
-          // Get model ID from status response
-          const modelId = data.modelId || data.output || null;
-          setCompletedModelId(modelId);
-          setIsTrainingComplete(true);
-          
-          // Save persona data to database (localStorage for now, can be replaced with API)
-          if (typeof window !== 'undefined' && triggerWord) {
-            const personaData = {
-              personaId: persona?.id,
-              triggerWord: triggerWord,
-              modelId: modelId, // Model ID from training output
-              trainingId: id, // Use the polling ID
-              createdAt: new Date().toISOString(),
-              imageCount: uploadedFiles.length,
-            };
-
-            // Save to localStorage
-            const saved = localStorage.getItem('trainedPersonasData');
-            const personas = saved ? JSON.parse(saved) : [];
-            personas.push(personaData);
-            localStorage.setItem('trainedPersonasData', JSON.stringify(personas));
-
-            // Also save trigger words list for quick access
-            const savedWords = localStorage.getItem('triggerWords');
-            const words = savedWords ? JSON.parse(savedWords) : [];
-            if (!words.includes(triggerWord)) {
-              words.push(triggerWord);
-              localStorage.setItem('triggerWords', JSON.stringify(words));
-            }
-
-            // Save to trainedPersonas for dropdown
-            const savedPersonasList = localStorage.getItem('trainedPersonas');
-            const personasList = savedPersonasList ? JSON.parse(savedPersonasList) : [];
-            if (!personasList.includes(triggerWord)) {
-              personasList.push(triggerWord);
-              localStorage.setItem('trainedPersonas', JSON.stringify(personasList));
-            }
-
-            // Also save to server/database via API
-            // Only save if we have a modelId (might be null initially)
-            if (modelId) {
-              try {
-                const saveResponse = await fetch('/api/save-persona', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ persona: personaData, user }),
-                });
-                
-                if (saveResponse.ok) {
-                  console.log('✓ Persona saved to database successfully');
-                } else {
-                  console.warn('Failed to save persona to database, but localStorage backup is in place');
-                }
-              } catch (error) {
-                console.error('Failed to save persona to database:', error);
-                // Continue anyway - localStorage backup is in place
-              }
-            } else {
-              console.warn('Model ID not available yet, will retry saving later');
-              // Could implement a retry mechanism here if needed
-            }
-          }
-          return;
-        }
-
-        if (data.status === 'failed') {
-          throw new Error(data.error || 'Training failed');
-        }
-
-        // Update progress based on status
-        if (data.progress) {
-          setTrainingProgress(40 + (data.progress * 0.6)); // 40-100% range
-        }
-
-        setTrainingStatus(data.statusMessage || 'Training in progress...');
-
-        attempts++;
-        if (attempts < maxAttempts) {
-          setTimeout(poll, 5000); // Poll every 5 seconds
-        } else {
-          throw new Error('Training timeout');
-        }
-      } catch (error: any) {
-        console.error('Polling error:', error);
-        setTrainingStatus(`Error: ${error.message}`);
-        setIsTraining(false);
-        setVisualStatus('none');
-      }
-    };
-
-    poll();
-  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0a0a0a]">
@@ -460,10 +687,10 @@ export default function PersonaPage() {
               </span>
             </div>
             <p className="text-gray-300 text-base mb-2">
-              One persona, trained once, used across every tool.
+              Train one persona and reuse it across videos, ads, and images.
             </p>
             <p className="text-gray-400 text-lg">
-              Train your custom AI model. Upload exactly 20 high-quality images to create your digital twin. Use your unique trigger word to generate consistent personas in all your creations.
+              Upload 20 photos to start.
             </p>
           </div>
 
@@ -473,8 +700,11 @@ export default function PersonaPage() {
               <div>
                 <h2 className="text-2xl font-semibold text-white mb-2">Visual Persona Training</h2>
                 <p className="text-gray-400">
-                  Upload exactly 20 high-quality images of yourself or the subject you want to train.
-                  Use clear, well-lit photos from different angles for best results.
+                  Upload exactly 20 clear photos of one subject.
+                  We train a private visual persona you can reuse everywhere.
+                </p>
+                <p className="text-gray-500 text-sm mt-2">
+                  Premium covers model training, private storage, and ongoing persona access across the suite.
                 </p>
               </div>
               <span className="px-3 py-1 text-xs font-semibold rounded-full bg-white/10 text-white">
@@ -484,24 +714,49 @@ export default function PersonaPage() {
 
             {!canTrainVisual && (
               <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center mb-6">
-                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
+                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-2">
                   <Lock className="w-4 h-4" />
-                  <span>Premium required for visual persona training.</span>
+                  <span>Premium Required</span>
                 </div>
-                <button
-                  onClick={() => setIsPricingModalOpen(true)}
-                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
-                >
-                  Upgrade to Premium
-                </button>
+                <p className="text-sm text-yellow-200 mb-3">
+                  Training a private persona requires dedicated GPU compute and storage. Premium unlocks training and keeps your model private.
+                </p>
+                <p className="text-sm text-yellow-200 mb-4">
+                  Free users can preview the flow; training starts after upgrade.
+                </p>
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <button
+                    onClick={() => setIsPricingModalOpen(true)}
+                    className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
+                  >
+                    Unlock persona training
+                  </button>
+                  <button
+                    onClick={() => setIsPricingModalOpen(true)}
+                    className="px-6 py-3 rounded-lg border border-yellow-500/40 text-yellow-200 hover:border-yellow-400/60 hover:text-yellow-100 transition-all"
+                  >
+                    See what Premium includes
+                  </button>
+                </div>
               </div>
             )}
             <p className="text-sm text-[#00d9ff] mb-6 flex items-center gap-2">
-              <Sparkles className="w-4 h-4" /> ZIP file will be created automatically - just select your images and click "Train My AI Persona"
+              <Sparkles className="w-4 h-4" /> Add 20 photos or a folder. We package them automatically.
             </p>
 
             {/* File Upload Buttons */}
             <div className="flex gap-4 mb-6">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Persona Name (Required)
+                </label>
+                <input
+                  value={personaName}
+                  onChange={(event) => setPersonaName(event.target.value)}
+                  placeholder="e.g. My LinkedIn Avatar, Game Character, etc."
+                  className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none placeholder-gray-500"
+                />
+              </div>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -515,28 +770,33 @@ export default function PersonaPage() {
                 disabled={isTraining || !canTrainVisual}
                 className="interactive-element glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                <Camera className="w-4 h-4" /> Upload Images (Multiple)
+                <Camera className="w-4 h-4" /> Select Images
               </button>
 
               <input
-                ref={zipInputRef}
                 type="file"
-                accept=".zip"
-                onChange={handleZipUpload}
+                accept="image/*"
+                multiple
+                // @ts-expect-error - webkitdirectory is a non-standard attribute supported by Chromium browsers
+                webkitdirectory=""
+                onChange={handleFileSelect}
                 className="hidden"
               />
               <button
-                onClick={() => zipInputRef.current?.click()}
+                onClick={(event) => {
+                  const input = (event.currentTarget.previousElementSibling as HTMLInputElement | null);
+                  input?.click();
+                }}
                 disabled={isTraining || !canTrainVisual}
                 className="glass rounded-lg px-6 py-3 text-white font-medium hover:bg-[#00d9ff]/10 border border-[#00d9ff]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                📦 Upload ZIP File
+                📁 Upload Folder
               </button>
             </div>
 
             {!canTrainVisual && (
               <p className="text-sm text-yellow-300 mb-4">
-                Visual uploads are visible but disabled on the free plan.
+                Status: Preview Mode (training locked)
               </p>
             )}
 
@@ -568,13 +828,25 @@ export default function PersonaPage() {
               </div>
             )}
 
+            <p className="text-sm text-gray-500 mb-4">
+              When training starts, you’ll see progress and your trigger word here.
+              Use that trigger word in any tool to get consistent results.
+            </p>
+            <p className="text-sm text-gray-500 mb-4">
+              If you leave this page, training continues in the background.
+            </p>
+            {trainingError && (
+              <p className="text-sm text-red-400 mb-4">
+                {trainingError}
+              </p>
+            )}
             {/* Training Button */}
             <button
               onClick={startTraining}
-              disabled={isTraining || uploadedFiles.length < 20 || !canTrainVisual}
+              disabled={isTraining || isUploadingImages || uploadedFiles.length < 20 || !canTrainVisual}
               className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isTraining ? 'Training in Progress...' : '🚀 Train My AI Persona'}
+              {isTraining ? 'Training in Progress...' : 'Train My AI Persona'}
             </button>
 
             {uploadedFiles.length < 20 && uploadedFiles.length > 0 && (
@@ -590,10 +862,11 @@ export default function PersonaPage() {
               <div>
                 <h2 className="text-2xl font-semibold text-white mb-2">Voice Persona Training</h2>
                 <p className="text-gray-400">
-                  Upload voice samples totaling 2–5 minutes. Clear audio with varied tones works best.
+                  Upload 2–5 minutes of clean voice samples.
+                  Voice personas power AI voiceovers in scripts and ads.
                 </p>
                 <p className="text-gray-500 text-sm mt-2">
-                  Voice personas power AI voiceovers in scripts and ads.
+                  Clear audio and varied tones work best.
                 </p>
               </div>
               <span className="px-3 py-1 text-xs font-semibold rounded-full bg-white/10 text-white">
@@ -603,16 +876,30 @@ export default function PersonaPage() {
 
             {!canTrainVoice && (
               <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-6 text-center mb-6">
-                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-3">
+                <div className="flex items-center justify-center gap-2 text-yellow-300 mb-2">
                   <Lock className="w-4 h-4" />
-                  <span>Premium required for voice persona training.</span>
+                  <span>Premium Required</span>
                 </div>
-                <button
-                  onClick={() => setIsPricingModalOpen(true)}
-                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
-                >
-                  Upgrade to Premium
-                </button>
+                <p className="text-sm text-yellow-200 mb-3">
+                  Training a private persona requires dedicated GPU compute and storage. Premium unlocks training and keeps your model private.
+                </p>
+                <p className="text-sm text-yellow-200 mb-4">
+                  Free users can preview the flow; training starts after upgrade.
+                </p>
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <button
+                    onClick={() => setIsPricingModalOpen(true)}
+                    className="px-6 py-3 rounded-lg bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-white font-semibold hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all"
+                  >
+                    Unlock persona training
+                  </button>
+                  <button
+                    onClick={() => setIsPricingModalOpen(true)}
+                    className="px-6 py-3 rounded-lg border border-yellow-500/40 text-yellow-200 hover:border-yellow-400/60 hover:text-yellow-100 transition-all"
+                  >
+                    See what Premium includes
+                  </button>
+                </div>
               </div>
             )}
             <div className="flex gap-4 mb-6">
@@ -646,7 +933,7 @@ export default function PersonaPage() {
 
             {!canTrainVoice && (
               <p className="text-sm text-yellow-300 mb-4">
-                Voice uploads are visible but disabled on the free plan.
+                Status: Preview Mode (training locked)
               </p>
             )}
 
@@ -666,12 +953,134 @@ export default function PersonaPage() {
               disabled={isVoiceTraining || voiceDurationSec < 120 || voiceDurationSec > 300 || !canTrainVoice}
               className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isVoiceTraining ? 'Training in Progress...' : '🎙️ Train My Voice Persona'}
+              {isVoiceTraining ? 'Training in Progress...' : 'Train My Voice Persona'}
             </button>
           </div>
 
+          {/* My Trained Personas */}
+          <div className="glass rounded-2xl p-8 mb-8">
+            <div className="flex items-start justify-between gap-4 mb-6">
+              <div>
+                <h2 className="text-2xl font-semibold text-white mb-2">My Trained Personas</h2>
+                <p className="text-gray-400">
+                  Manage your trained personas here.
+                </p>
+              </div>
+            </div>
+
+            {isLoadingPersonas && (
+              <p className="text-sm text-gray-400">Loading personas...</p>
+            )}
+
+            {!isLoadingPersonas && personaList.length === 0 && (
+              <p className="text-sm text-gray-500">
+                No personas found yet.
+              </p>
+            )}
+
+            {!isLoadingPersonas && personaList.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {personaList.map((personaItem) => {
+                  return (
+                    <div
+                      key={personaItem.id}
+                      className="rounded-xl border p-4 border-white/10 bg-white/5"
+                    >
+                      <div className="flex items-start justify-between mb-3 gap-4">
+                        <div>
+                          <p className="text-white font-semibold">
+                            {personaItem.name?.trim() ? personaItem.name : 'Untitled Persona'}
+                          </p>
+                          <p className="text-xs text-gray-400 mt-1">
+                            {personaItem.id.slice(0, 8)}...
+                          </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-200">
+                              {personaItem.type === 'voice' ? 'Voice' : 'Visual'}
+                            </span>
+                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                              {personaItem.status === 'trained' ? 'Successful' : personaItem.status}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-xs text-gray-400">
+                          {formatPersonaDate(personaItem.createdAt)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-gray-400">
+                          Status: {personaItem.status === 'trained' ? 'Successful' : personaItem.status}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              openRenameModal(personaItem.id, personaItem.name);
+                            }}
+                            className="px-3 py-2 rounded-lg text-xs font-semibold bg-white/10 text-white hover:bg-white/20 inline-flex items-center gap-2"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            Rename
+                          </button>
+                          {personaItem.status === 'training' && (
+                            <button
+                              onClick={() => handleCancelTraining(personaItem.personaKey, personaItem.dbId)}
+                              className="px-3 py-2 rounded-lg text-xs font-semibold bg-yellow-500/20 text-yellow-200 hover:bg-yellow-500/30 inline-flex items-center gap-2"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                          <button
+                            onClick={async () => {
+                              const confirmed = window.confirm('Remove this persona from your list?');
+                              if (!confirmed) return;
+                              try {
+                                await fetch('/api/save-persona', {
+                                  method: 'DELETE',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    personaId: personaItem.dbId ?? personaItem.personaKey,
+                                    user,
+                                  }),
+                                });
+                              } catch (error) {
+                                console.error('Failed to delete persona:', error);
+                              }
+                              const deleted = getDeletedPersonaIds();
+                              deleted.add(personaItem.personaKey);
+                              persistDeletedPersonaIds(deleted);
+                              setTrainedPersonas(prev => prev.filter(item => item.id !== personaItem.id));
+                            }}
+                            className="px-3 py-2 rounded-lg text-xs font-semibold bg-red-500/20 text-red-300 hover:bg-red-500/30 inline-flex items-center gap-2"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                      {personaItem.status === 'training' && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between text-[11px] text-gray-400 mb-2">
+                            <span>Training progress</span>
+                            <span>{typeof personaItem.progress === 'number' ? `${personaItem.progress}%` : 'calculating...'}</span>
+                          </div>
+                          <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-[#00d9ff] to-[#0099cc]"
+                              style={{ width: `${Math.min(100, Math.max(0, personaItem.progress ?? 2))}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+          </div>
+
           {/* Cinematic Training Progress Screen */}
-          {isTraining && (
+          {(isTraining || activeTraining) && (
             <div className="relative glass rounded-2xl p-8 mb-8 overflow-hidden">
               {/* Animated background effect */}
               <div className="absolute inset-0 opacity-20">
@@ -713,14 +1122,24 @@ export default function PersonaPage() {
                 {/* Progress Bar with Animation */}
                 <div className="mb-6">
                   <div className="flex justify-between items-center text-sm mb-3">
-                    <span className="text-gray-300 font-medium">{trainingStatus}</span>
-                    <span className="text-[#00d9ff] font-bold text-lg">{Math.round(trainingProgress)}%</span>
+                    <span className="text-gray-300 font-medium">
+                      {trainingStatus || 'Persona eğitiliyor'}
+                    </span>
+                    <span className="text-[#00d9ff] font-bold text-lg">
+                      {typeof activeTraining?.progress === 'number'
+                        ? `${Math.round(activeTraining.progress)}%`
+                        : isTrainingIndeterminate ? '—' : `${Math.round(trainingProgress)}%`}
+                    </span>
                   </div>
                   <div className="relative w-full bg-gray-800/50 rounded-full h-6 overflow-hidden border border-gray-700">
                     {/* Animated gradient bar */}
                     <div
-                      className="relative h-full bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] transition-all duration-700 ease-out shadow-lg"
-                      style={{ width: `${trainingProgress}%` }}
+                      className={`relative h-full bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] transition-all duration-700 ease-out shadow-lg ${isTrainingIndeterminate ? 'animate-pulse' : ''}`}
+                      style={{
+                        width: isTrainingIndeterminate
+                          ? '100%'
+                          : `${typeof activeTraining?.progress === 'number' ? activeTraining.progress : trainingProgress}%`,
+                      }}
                     >
                       {/* Shimmer effect */}
                       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer" />
@@ -728,17 +1147,35 @@ export default function PersonaPage() {
                     {/* Progress glow */}
                     <div
                       className="absolute top-0 h-full bg-[#00d9ff]/50 blur-md transition-all duration-700"
-                      style={{ width: `${trainingProgress}%` }}
+                      style={{
+                        width: isTrainingIndeterminate
+                          ? '100%'
+                          : `${typeof activeTraining?.progress === 'number' ? activeTraining.progress : trainingProgress}%`,
+                      }}
                     />
                   </div>
                   
                   {/* Step indicators */}
-                  <div className="flex justify-between mt-4 text-xs text-gray-500">
-                    <span className={trainingProgress > 10 ? 'text-[#00d9ff]' : ''}>✓ Preparing</span>
-                    <span className={trainingProgress > 30 ? 'text-[#00d9ff]' : ''}>✓ Uploading</span>
-                    <span className={trainingProgress > 50 ? 'text-[#00d9ff]' : ''}>✓ Training</span>
-                    <span className={trainingProgress > 90 ? 'text-[#00d9ff]' : ''}>✓ Finalizing</span>
-                  </div>
+                  {!isTrainingIndeterminate && (
+                    <div className="flex justify-between mt-4 text-xs text-gray-500">
+                      <span className={trainingProgress > 10 ? 'text-[#00d9ff]' : ''}>✓ Preparing</span>
+                      <span className={trainingProgress > 30 ? 'text-[#00d9ff]' : ''}>✓ Uploading</span>
+                      <span className={trainingProgress > 50 ? 'text-[#00d9ff]' : ''}>✓ Training</span>
+                      <span className={trainingProgress > 90 ? 'text-[#00d9ff]' : ''}>✓ Finalizing</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 flex justify-end">
+                  {activeTraining?.personaKey && (
+                    <button
+                      type="button"
+                      onClick={() => handleCancelTraining(activeTraining.personaKey, activeTraining.dbId)}
+                      className="px-4 py-2 rounded-lg text-xs font-semibold bg-yellow-500/20 text-yellow-200 hover:bg-yellow-500/30 inline-flex items-center gap-2"
+                    >
+                      Cancel Training
+                    </button>
+                  )}
                 </div>
 
                 {/* Estimated time */}
@@ -746,7 +1183,11 @@ export default function PersonaPage() {
                   <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  <span>Estimated time: {Math.max(1, Math.ceil((100 - trainingProgress) / 10))} minutes remaining</span>
+                  <span>
+                    {isTrainingIndeterminate
+                      ? 'Estimated time: calculating...'
+                      : `Estimated time: ${Math.max(1, Math.ceil((100 - trainingProgress) / 10))} minutes remaining`}
+                  </span>
                 </div>
 
                 {trainingId && (
@@ -798,7 +1239,7 @@ export default function PersonaPage() {
                   <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-[#00d9ff] to-[#0099cc] mb-4 animate-bounce">
                     <span className="text-4xl">✓</span>
                   </div>
-                  <h2 className="text-3xl font-bold text-white mb-2">Training Complete!</h2>
+                  <h2 className="text-3xl font-bold text-white mb-2">Successful ✅</h2>
                   <p className="text-gray-400">Your AI persona is ready to use</p>
                 </div>
 
@@ -884,6 +1325,57 @@ export default function PersonaPage() {
         isOpen={isPricingModalOpen}
         onClose={() => setIsPricingModalOpen(false)}
       />
+
+      {isRenameOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={closeRenameModal}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              closeRenameModal();
+            }
+          }}
+          tabIndex={-1}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-white/10 bg-gray-900 p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-white mb-4">Rename Persona</h3>
+            <input
+              value={renameValue}
+              onChange={(event) => setRenameValue(event.target.value)}
+              placeholder="Enter persona name"
+              className="w-full rounded-lg border border-white/10 bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:border-[#00d9ff]/50 focus:outline-none"
+              autoFocus
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  saveRename();
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  closeRenameModal();
+                }
+              }}
+            />
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={closeRenameModal}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-gray-300 hover:bg-white/5"
+              >
+                İptal
+              </button>
+              <button
+                onClick={saveRename}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] text-black hover:opacity-90"
+              >
+                Kaydet
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

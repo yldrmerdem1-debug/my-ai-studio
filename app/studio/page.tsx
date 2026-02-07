@@ -16,7 +16,7 @@ export default function StudioPage() {
   const { showToast } = useToast();
   const { user, persona } = usePersona();
   const canUsePersonaFeatures = canUsePersona(user);
-  const personaReady = persona?.visualStatus === 'ready';
+  const personaReady = persona?.status === 'completed';
   const [selectedTool, setSelectedTool] = useState<ToolMode>(null);
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
@@ -30,6 +30,31 @@ export default function StudioPage() {
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const targetInputRef = useRef<HTMLInputElement>(null);
   const [identityMode, setIdentityMode] = useState<'single' | 'persona'>('single');
+  const [selectedTrainingId, setSelectedTrainingId] = useState<string | null>(null);
+  const [selectedTriggerWord, setSelectedTriggerWord] = useState<string | null>(null);
+  const [useSelectedPersona, setUseSelectedPersona] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedId = localStorage.getItem('selectedPersonaTrainingId');
+    const storedMap = localStorage.getItem('personaTriggerWords');
+    const triggerMap = storedMap ? JSON.parse(storedMap) : {};
+    if (storedId) {
+      setSelectedTrainingId(storedId);
+      setSelectedTriggerWord(triggerMap?.[storedId] ?? null);
+      setUseSelectedPersona(true);
+    }
+    const onStorage = () => {
+      const nextId = localStorage.getItem('selectedPersonaTrainingId');
+      const nextMap = localStorage.getItem('personaTriggerWords');
+      const nextTriggerMap = nextMap ? JSON.parse(nextMap) : {};
+      setSelectedTrainingId(nextId);
+      setSelectedTriggerWord(nextId ? nextTriggerMap?.[nextId] ?? null : null);
+      setUseSelectedPersona(Boolean(nextId));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const getPersonaId = () => {
     return identityMode === 'persona' ? persona?.id : undefined;
@@ -118,6 +143,7 @@ export default function StudioPage() {
     try {
     const imageDataUrl = await fileToDataUrl(uploadedImage);
     const personaId = getPersonaId();
+    const trainingId = useSelectedPersona ? selectedTrainingId : null;
 
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -129,8 +155,9 @@ export default function StudioPage() {
           image: imageDataUrl,
           triggerWord: undefined,
           personaId,
+          trainingId,
           personaMode: identityMode === 'persona' ? 'persona' : 'generic',
-          personaStatus: persona?.visualStatus ?? 'none',
+          personaStatus: persona?.status ?? 'training',
           user,
         }),
       });
@@ -176,6 +203,13 @@ export default function StudioPage() {
     try {
     const imageDataUrl = await fileToDataUrl(uploadedImage);
     const personaId = getPersonaId();
+    const trainingId = useSelectedPersona ? selectedTrainingId : null;
+    const needsTrigger = selectedTriggerWord && backgroundPrompt
+      ? !backgroundPrompt.toLowerCase().includes(selectedTriggerWord.toLowerCase())
+      : false;
+    const finalPrompt = selectedTriggerWord && needsTrigger
+      ? `${selectedTriggerWord} ${backgroundPrompt}`.trim()
+      : backgroundPrompt;
 
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -185,11 +219,12 @@ export default function StudioPage() {
         body: JSON.stringify({
           action: 'studio-background',
           image: imageDataUrl,
-          prompt: backgroundPrompt || 'professional studio background, clean white background, high quality photography',
+          prompt: finalPrompt || 'professional studio background, clean white background, high quality photography',
           triggerWord: undefined,
           personaId,
+          trainingId,
           personaMode: identityMode === 'persona' ? 'persona' : 'generic',
-          personaStatus: persona?.visualStatus ?? 'none',
+          personaStatus: persona?.status ?? 'training',
           user,
         }),
       });
@@ -497,6 +532,23 @@ export default function StudioPage() {
                         <label className="block text-sm font-medium text-gray-300 mb-2">
                           Background Description (Optional)
                         </label>
+                        <div className="flex items-center justify-between mb-3">
+                          <label className="flex items-center gap-2 text-sm text-gray-300">
+                            <input
+                              type="checkbox"
+                              checked={useSelectedPersona && Boolean(selectedTrainingId)}
+                              onChange={(event) => setUseSelectedPersona(event.target.checked)}
+                              disabled={!selectedTrainingId}
+                              className="h-4 w-4 rounded border-white/20 bg-black/40 text-[#00d9ff] focus:ring-[#00d9ff]/40"
+                            />
+                            Use Persona
+                          </label>
+                          {selectedTrainingId && useSelectedPersona && (
+                            <span className="text-xs text-[#00d9ff]">
+                              Active: {selectedTrainingId.slice(0, 8)}...
+                            </span>
+                          )}
+                        </div>
                         <textarea
                           value={backgroundPrompt}
                           onChange={(e) => setBackgroundPrompt(e.target.value)}

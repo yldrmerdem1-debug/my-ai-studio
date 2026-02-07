@@ -19,3 +19,11 @@ Free usage focuses on generic AI generation. Premium unlocks persona training an
 - Gemini for text intelligence and creative direction
 - Replicate for image and video generation
 - ElevenLabs for voice synthesis
+
+## Replicate training env
+Persona training uses Replicate FLUX LoRA training and requires these server env vars:
+- `REPLICATE_API_TOKEN`
+- `REPLICATE_TRAINING_MODEL` (destination model in `username/model-name` format)
+- `REPLICATE_TRAINING_VERSION` (trainer version UUID for `replicate/fast-flux-trainer`)
+
+Note: `REPLICATE_TRAINING_MODEL` is the destination model, not the trainer.

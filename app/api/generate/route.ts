@@ -13,6 +13,7 @@ const MODEL_MAP: Record<string, string> = {
   'background-removal': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
   '3d-motion': 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438',
   'ad-script': 'meta/llama-3.1-8b-instruct:af1c688b4a10d836358128ace4b7821950d6cbcd3d4532511146196b3b7c5c2b',
+  'generate-image': 'black-forest-labs/flux-dev',
 };
 
 /**
@@ -112,7 +113,7 @@ export async function POST(request: NextRequest) {
       auth: apiToken.trim(),
     });
 
-    const { action, image, prompt, triggerWord, user, personaMode, personaId } = await request.json();
+    const { action, image, prompt, triggerWord, user, personaMode, personaId, trainingId } = await request.json();
 
     const wantsPersona = personaMode === 'persona' || !!triggerWord;
     if (wantsPersona) {
@@ -176,6 +177,30 @@ export async function POST(request: NextRequest) {
         version: model,
         input: {
           image: image,
+        },
+      });
+    } else if (action === 'generate-image') {
+      let imagePrompt = prompt || 'high quality portrait photo, studio lighting';
+      imagePrompt = await translateToEnglish(imagePrompt);
+
+      let loraWeights: string | null = null;
+      if (trainingId) {
+        const training = await replicate.trainings.get(trainingId);
+        const output = training?.output ?? {};
+        loraWeights = output?.weights ?? output?.weights_url ?? null;
+        if (!loraWeights) {
+          return NextResponse.json(
+            { error: 'Training weights not available yet' },
+            { status: 400 }
+          );
+        }
+      }
+
+      prediction = await replicate.predictions.create({
+        version: model,
+        input: {
+          prompt: imagePrompt,
+          ...(loraWeights ? { lora_weights: loraWeights, lora_scale: 0.8 } : {}),
         },
       });
     } else if (action === 'studio-background') {

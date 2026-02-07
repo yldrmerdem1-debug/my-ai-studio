@@ -50,8 +50,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Use fofr/luma-dream-machine or kling-ai
-    const modelOptions = ['fofr/luma-dream-machine', 'kling-ai/kling-ai'];
+    // Use fofr/luma-dream-machine or kling v2.5
+    const modelOptions = ['fofr/luma-dream-machine', 'kwaivgi/kling-v2.5-turbo-pro'];
     let prediction;
     let lastError;
 

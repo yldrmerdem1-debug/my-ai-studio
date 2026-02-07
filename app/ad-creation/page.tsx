@@ -1,198 +1,106 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
-import { Sparkles, Upload, Video, FileText, Volume2, Loader2 } from 'lucide-react';
-import { useToast } from '@/hooks/useToast';
+import { Sparkles, Upload, Video, FileText, Loader2, BadgeCheck } from 'lucide-react';
+
+type OutputMap = Record<string, string>;
 
 export default function AdCreationPage() {
-  const { showToast } = useToast();
-  const [productImage, setProductImage] = useState<File | null>(null);
-  const [productDescription, setProductDescription] = useState('');
-  const [generatedScript, setGeneratedScript] = useState('');
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
-  const [isConvertingToVoice, setIsConvertingToVoice] = useState(false);
-  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  const [currentStep, setCurrentStep] = useState<'script' | 'voice' | 'video' | null>(null);
+  const [videoUrl, setVideoUrl] = useState('');
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [ctaText, setCtaText] = useState('Shop Now');
+  const [captionText, setCaptionText] = useState('');
+  const [useCaptions, setUseCaptions] = useState(true);
+  const [format916, setFormat916] = useState(true);
+  const [format169, setFormat169] = useState(true);
+  const [isPackaging, setIsPackaging] = useState(false);
+  const [outputs, setOutputs] = useState<OutputMap>({});
+  const [errorMessage, setErrorMessage] = useState('');
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const logoInputRef = useRef<HTMLInputElement>(null);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) setProductImage(file);
-  };
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const latestVideo = localStorage.getItem('latestRawVideoUrl');
+    if (latestVideo && !videoUrl) {
+      setVideoUrl(latestVideo);
+    }
+    const directorRaw = localStorage.getItem('adDirectorPlan');
+    if (directorRaw) {
+      try {
+        const parsed = JSON.parse(directorRaw);
+        const audioScript = parsed?.scenario?.plan?.audio_script;
+        if (audioScript && !captionText) {
+          setCaptionText(audioScript);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }, [videoUrl, captionText]);
 
-  const handleGenerateScript = async () => {
-    if (!productDescription.trim()) {
-      showToast('Please enter a product description', 'warning');
+  useEffect(() => {
+    if (!logoFile) {
+      setLogoPreview(null);
       return;
     }
+    const objectUrl = URL.createObjectURL(logoFile);
+    setLogoPreview(objectUrl);
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [logoFile]);
 
-    setIsGeneratingScript(true);
-    setCurrentStep('script');
-    setGeneratedScript('');
-    setAudioUrl(null);
-    setVideoUrl(null);
-
+  const handlePackaging = async () => {
+    if (!videoUrl.trim()) {
+      setErrorMessage('Paste a raw video URL from AI Video.');
+      return;
+    }
+    if (!format916 && !format169) {
+      setErrorMessage('Select at least one output format.');
+      return;
+    }
+    setIsPackaging(true);
+    setErrorMessage('');
+    setOutputs({});
     try {
-      const response = await fetch('/api/generate-ad-script', {
+      const logoDataUrl = logoFile
+        ? await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Failed to read logo'));
+          reader.readAsDataURL(logoFile);
+        })
+        : undefined;
+
+      const response = await fetch('/api/auto-editor', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: productDescription,
-          context: {
-            length: 'medium',
-            tone: 'energetic',
-          },
+          videoUrl: videoUrl.trim(),
+          logoDataUrl,
+          ctaText: ctaText.trim(),
+          captionsText: captionText.trim(),
+          addCaptions: useCaptions,
+          outputFormats: [
+            ...(format916 ? ['9:16'] : []),
+            ...(format169 ? ['16:9'] : []),
+          ],
         }),
       });
-
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to generate script');
+        throw new Error(data.error || data.details || 'Failed to package video');
       }
-
-      const data = await response.json();
-      setGeneratedScript(data.script || '');
-      showToast('Script generated successfully!', 'success');
+      setOutputs(data.outputs || {});
     } catch (error: any) {
-      showToast(error.message || 'Failed to generate script', 'error');
+      setErrorMessage(error.message || 'Packaging failed');
     } finally {
-      setIsGeneratingScript(false);
-    }
-  };
-
-  const handleConvertToVoice = async () => {
-    if (!generatedScript.trim()) {
-      showToast('Please generate a script first', 'warning');
-      return;
-    }
-
-    setIsConvertingToVoice(true);
-    setCurrentStep('voice');
-    setAudioUrl(null);
-
-    try {
-      const response = await fetch('/api/text-to-speech', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: generatedScript,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to convert to speech');
-      }
-
-      const data = await response.json();
-      setAudioUrl(data.audioUrl);
-
-      // Auto-save audio
-      if (data.audioUrl && typeof window !== 'undefined') {
-        const { saveAudioAsset } = await import('@/lib/assets-storage');
-        saveAudioAsset(data.audioUrl, `Ad Voiceover - ${new Date().toLocaleDateString()}`, {
-          model: 'elevenlabs',
-        });
-      }
-
-      showToast('Voiceover generated successfully!', 'success');
-    } catch (error: any) {
-      showToast(error.message || 'Failed to convert to speech', 'error');
-    } finally {
-      setIsConvertingToVoice(false);
-    }
-  };
-
-  const handleGenerateVideo = async () => {
-    if (!productImage) {
-      showToast('Please upload a product image', 'warning');
-      return;
-    }
-    if (!generatedScript.trim()) {
-      showToast('Please generate a script first', 'warning');
-      return;
-    }
-
-    setIsGeneratingVideo(true);
-    setCurrentStep('video');
-    setVideoUrl(null);
-
-    try {
-      const formData = new FormData();
-      formData.append('image', productImage);
-      formData.append('prompt', generatedScript);
-
-      const response = await fetch('/api/ad-creation', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to create ad video');
-      }
-
-      const data = await response.json();
-      
-      if (data.predictionId) {
-        // Poll for result
-        const pollInterval = setInterval(async () => {
-          try {
-            const statusResponse = await fetch(`/api/ad-creation/status?predictionId=${data.predictionId}`);
-            const statusData = await statusResponse.json();
-            
-            if (statusData.status === 'succeeded' && statusData.output) {
-              clearInterval(pollInterval);
-              const videoUrlResult = Array.isArray(statusData.output) ? statusData.output[0] : statusData.output;
-              setVideoUrl(videoUrlResult);
-              
-              // Auto-save video
-              if (typeof window !== 'undefined') {
-                const { saveVideoAsset } = await import('@/lib/assets-storage');
-                saveVideoAsset(videoUrlResult, `Ad Video - ${new Date().toLocaleDateString()}`, {
-                  model: 'fofr/luma-dream-machine',
-                  prompt: generatedScript,
-                });
-              }
-              
-              setIsGeneratingVideo(false);
-              setCurrentStep(null);
-              showToast('Video generated successfully!', 'success');
-            } else if (statusData.status === 'failed') {
-              clearInterval(pollInterval);
-              setIsGeneratingVideo(false);
-              setCurrentStep(null);
-              showToast('Video generation failed: ' + (statusData.error || 'Unknown error'), 'error');
-            }
-          } catch (pollError: any) {
-            clearInterval(pollInterval);
-            setIsGeneratingVideo(false);
-            setCurrentStep(null);
-            showToast('Failed to check video status', 'error');
-          }
-        }, 3000);
-
-        setTimeout(() => {
-          clearInterval(pollInterval);
-          setIsGeneratingVideo(false);
-          setCurrentStep(null);
-          showToast('Generation timeout. Please try again.', 'warning');
-        }, 120000);
-      }
-    } catch (error: any) {
-      setIsGeneratingVideo(false);
-      setCurrentStep(null);
-      showToast(error.message || 'Failed to create ad', 'error');
+      setIsPackaging(false);
     }
   };
 
@@ -203,7 +111,6 @@ export default function AdCreationPage() {
 
       <main className="relative z-10 ml-64">
         <div className="container mx-auto px-8 py-12">
-          {/* Header */}
           <div className="mb-8">
             <Link href="/" className="text-[#00d9ff] hover:text-[#0099ff] mb-4 inline-block transition-colors">
               ← Back to Studio
@@ -212,159 +119,166 @@ export default function AdCreationPage() {
               <Sparkles className="w-8 h-8 text-[#fbbf24]" style={{ filter: 'drop-shadow(0 0 8px #fbbf24)' }} />
               <h1 className="text-4xl font-bold text-white">
                 <span className="bg-gradient-to-r from-[#fbbf24] via-[#f59e0b] to-[#fbbf24] bg-clip-text text-transparent">
-                  AI Ad Creation
+                  Auto-Editor
                 </span>
               </h1>
             </div>
             <p className="text-gray-400 text-lg">
-              Create complete ad videos: Generate script with Gemini, convert to voice with ElevenLabs, and create video with Replicate.
+              Turn a raw AI video into a publish-ready ad with captions, branding, and CTA.
             </p>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Input Section */}
             <div className="space-y-6">
-              {/* Product Image */}
+              <div className="glass rounded-2xl p-8">
+                <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+                  <Video className="w-5 h-5 text-[#00d9ff]" />
+                  Raw Video Input
+                </h2>
+                <textarea
+                  value={videoUrl}
+                  onChange={(event) => setVideoUrl(event.target.value)}
+                  placeholder="Paste raw video URL from AI Video"
+                  rows={3}
+                  className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[#fbbf24]/50 transition-colors resize-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (typeof window === 'undefined') return;
+                    const latest = localStorage.getItem('latestRawVideoUrl');
+                    if (latest) setVideoUrl(latest);
+                  }}
+                  className="mt-3 text-xs text-[#00d9ff] hover:text-[#0099ff]"
+                >
+                  Use latest AI Video output
+                </button>
+              </div>
+
               <div className="glass rounded-2xl p-8">
                 <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
                   <Upload className="w-5 h-5 text-[#00d9ff]" />
-                  Product Image
+                  Brand Logo
                 </h2>
                 <input
-                  ref={fileInputRef}
+                  ref={logoInputRef}
                   type="file"
                   accept="image/*"
-                  onChange={handleImageUpload}
+                  onChange={(event) => setLogoFile(event.target.files?.[0] || null)}
                   className="hidden"
                 />
                 <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="interactive-element w-full h-64 border-2 border-dashed border-white/20 rounded-xl flex flex-col items-center justify-center gap-4 hover:border-[#00d9ff]/50 transition-colors"
+                  onClick={() => logoInputRef.current?.click()}
+                  className="interactive-element w-full h-44 border-2 border-dashed border-white/20 rounded-xl flex flex-col items-center justify-center gap-3 hover:border-[#00d9ff]/50 transition-colors"
                 >
-                  {productImage ? (
-                    <img
-                      src={URL.createObjectURL(productImage)}
-                      alt="Product"
-                      className="w-full h-full object-cover rounded-lg"
-                    />
+                  {logoPreview ? (
+                    <img src={logoPreview} alt="Logo preview" className="h-24 object-contain" />
                   ) : (
                     <>
-                      <Upload className="w-12 h-12 text-gray-400" />
-                      <p className="text-gray-400">Click to upload product image</p>
+                      <Upload className="w-10 h-10 text-gray-400" />
+                      <p className="text-gray-400">Upload logo (PNG/SVG)</p>
                     </>
                   )}
                 </button>
               </div>
 
-              {/* Product Description */}
-              <div className="glass rounded-2xl p-8">
-                <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+              <div className="glass rounded-2xl p-8 space-y-4">
+                <h2 className="text-xl font-semibold text-white flex items-center gap-2">
                   <FileText className="w-5 h-5 text-[#00d9ff]" />
-                  Product Description
+                  Captions & CTA
                 </h2>
+                <label className="flex items-center gap-3 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={useCaptions}
+                    onChange={(event) => setUseCaptions(event.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  Burn in captions (auto-timed)
+                </label>
                 <textarea
-                  value={productDescription}
-                  onChange={(e) => setProductDescription(e.target.value)}
-                  placeholder="Describe your product, key features, and target audience..."
-                  rows={6}
-                  className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[#fbbf24]/50 transition-colors resize-none interactive-element"
+                  value={captionText}
+                  onChange={(event) => setCaptionText(event.target.value)}
+                  placeholder="Paste the spoken script for captions"
+                  rows={4}
+                  className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[#fbbf24]/50 transition-colors resize-none"
                 />
+                <input
+                  value={ctaText}
+                  onChange={(event) => setCtaText(event.target.value)}
+                  placeholder="CTA text (e.g., Shop Now)"
+                  className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[#fbbf24]/50 transition-colors"
+                />
+              </div>
+
+              <div className="glass rounded-2xl p-8 space-y-4">
+                <h2 className="text-xl font-semibold text-white">Output Formats</h2>
+                <label className="flex items-center gap-3 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={format916}
+                    onChange={(event) => setFormat916(event.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  9:16 (TikTok / Reels)
+                </label>
+                <label className="flex items-center gap-3 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={format169}
+                    onChange={(event) => setFormat169(event.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  16:9 (YouTube)
+                </label>
                 <button
-                  onClick={handleGenerateScript}
-                  disabled={isGeneratingScript || !productDescription.trim()}
-                  className="interactive-element mt-4 w-full px-6 py-3 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  type="button"
+                  onClick={handlePackaging}
+                  disabled={isPackaging}
+                  className="interactive-element w-full px-6 py-3 bg-gradient-to-r from-[#fbbf24] to-[#f59e0b] text-black font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                  {isGeneratingScript ? (
+                  {isPackaging ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      Generating Script...
+                      Packaging...
                     </>
                   ) : (
                     <>
-                      <FileText className="w-5 h-5" />
-                      Step 1: Generate Script (Gemini)
+                      <BadgeCheck className="w-5 h-5" />
+                      Build Campaign Assets
                     </>
                   )}
                 </button>
-              </div>
-
-              {/* Script Output */}
-              {generatedScript && (
-                <div className="glass rounded-2xl p-8">
-                  <h2 className="text-xl font-semibold text-white mb-4">Generated Script</h2>
-                  <div className="bg-black/40 border border-white/10 rounded-lg p-4 mb-4 max-h-48 overflow-y-auto">
-                    <pre className="text-white whitespace-pre-wrap font-sans text-sm leading-relaxed">
-                      {generatedScript}
-                    </pre>
-                  </div>
-                  <button
-                    onClick={handleConvertToVoice}
-                    disabled={isConvertingToVoice}
-                    className="interactive-element w-full px-6 py-3 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {isConvertingToVoice ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Converting to Voice...
-                      </>
-                    ) : (
-                      <>
-                        <Volume2 className="w-5 h-5" />
-                        Step 2: Convert to Voice (ElevenLabs)
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-
-              {/* Audio Output */}
-              {audioUrl && (
-                <div className="glass rounded-2xl p-8">
-                  <h2 className="text-xl font-semibold text-white mb-4">Voiceover</h2>
-                  <audio src={audioUrl} controls className="w-full mb-4" />
-                  <button
-                    onClick={handleGenerateVideo}
-                    disabled={isGeneratingVideo || !productImage}
-                    className="interactive-element w-full px-6 py-3 bg-gradient-to-r from-[#fbbf24] to-[#f59e0b] text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {isGeneratingVideo ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        Generating Video...
-                      </>
-                    ) : (
-                      <>
-                        <Video className="w-5 h-5" />
-                        Step 3: Generate Video (Replicate)
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Result Section */}
-            <div className="glass rounded-2xl p-8">
-              <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
-                <Video className="w-5 h-5 text-[#fbbf24]" />
-                Final Ad Video
-              </h2>
-              <div className="w-full h-[600px] border-2 border-dashed border-white/20 rounded-xl flex items-center justify-center bg-black/30">
-                {isGeneratingVideo || currentStep === 'video' ? (
-                  <div className="text-center">
-                    <Loader2 className="w-16 h-16 border-4 border-[#fbbf24] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                    <p className="text-gray-400">Generating ad video...</p>
-                    <p className="text-sm text-gray-500 mt-2">This may take a few minutes</p>
-                  </div>
-                ) : videoUrl ? (
-                  <video src={videoUrl} controls className="w-full h-full rounded-lg" />
-                ) : (
-                  <div className="text-center text-gray-500">
-                    <Video className="w-20 h-20 mx-auto mb-4 text-white/40" />
-                    <p>Complete all steps to generate your ad video</p>
+                {errorMessage && (
+                  <div className="text-sm text-red-300 border border-red-500/30 bg-red-500/10 rounded-lg px-3 py-2">
+                    {errorMessage}
                   </div>
                 )}
               </div>
+            </div>
+
+            <div className="glass rounded-2xl p-8">
+              <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+                <Video className="w-5 h-5 text-[#fbbf24]" />
+                Ready-to-Post Outputs
+              </h2>
+              {Object.keys(outputs).length === 0 ? (
+                <div className="w-full h-[520px] border-2 border-dashed border-white/20 rounded-xl flex items-center justify-center bg-black/30">
+                  <div className="text-center text-gray-500">
+                    <Video className="w-16 h-16 mx-auto mb-4 text-white/40" />
+                    <p>Package a raw video to see final outputs.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {Object.entries(outputs).map(([format, url]) => (
+                    <div key={format} className="space-y-3">
+                      <p className="text-sm text-gray-300">{format}</p>
+                      <video src={url} controls className="w-full rounded-lg border border-white/10" />
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

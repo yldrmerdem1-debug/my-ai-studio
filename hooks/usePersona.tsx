@@ -6,6 +6,7 @@ import type { User } from '@/lib/subscription';
 import { canTrainVisualPersona, canTrainVoicePersona, isPremiumUser } from '@/lib/subscription';
 
 export type PersonaStatus = 'none' | 'training' | 'ready';
+export type PersonaTrainingStatus = 'training' | 'completed' | 'failed';
 
 export type Persona = {
   id: string;
@@ -13,6 +14,11 @@ export type Persona = {
   hasVoicePersona: boolean;
   visualStatus: PersonaStatus;
   voiceStatus: PersonaStatus;
+  status: PersonaTrainingStatus;
+  trainingId?: string;
+  destinationModel?: string;
+  weightsUrl?: string;
+  errorMessage?: string;
   createdAt: Date;
 };
 
@@ -32,6 +38,7 @@ type PersonaContextValue = {
   requestVoicePersona: (totalSeconds: number) => PersonaRequestResult;
   setVisualStatus: (status: PersonaStatus) => void;
   setVoiceStatus: (status: PersonaStatus) => void;
+  setPersonaStatus: (status: PersonaTrainingStatus, updates?: Partial<Persona>) => void;
   resetPersona: () => void;
 };
 
@@ -47,13 +54,31 @@ const buildPersona = (): Persona => {
     hasVoicePersona: false,
     visualStatus: 'none',
     voiceStatus: 'none',
+    status: 'training',
     createdAt: new Date(),
+  };
+};
+
+const resolveInitialUser = (): User | null => {
+  if (typeof window === 'undefined') return null;
+  const envUserId = process.env.NEXT_PUBLIC_PERSONA_USER_ID;
+  const storedId = localStorage.getItem('localUserId');
+  const id = envUserId || storedId || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `user_${Date.now()}`);
+  if (!storedId) {
+    localStorage.setItem('localUserId', id);
+  }
+  return {
+    id,
+    plan: 'free',
+    isPremium: false,
   };
 };
 
 export function PersonaProvider({ children }: { children: ReactNode }) {
   const [persona, setPersona] = useState<Persona | null>(null);
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => resolveInitialUser());
   const isPremium = isPremiumUser(user);
   const setIsPremiumUser = useCallback((isPremium: boolean) => {
     setUser(prev => ({
@@ -65,8 +90,9 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const envUserId = process.env.NEXT_PUBLIC_PERSONA_USER_ID;
     const storedId = localStorage.getItem('localUserId');
-    const id = storedId ?? (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    const id = envUserId || storedId || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `user_${Date.now()}`);
     if (!storedId) {
@@ -94,6 +120,7 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
         ...next,
         hasVisualPersona: true,
         visualStatus: 'training',
+        status: 'training',
       };
     });
     return { ok: true, personaId: createdId };
@@ -123,7 +150,11 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
     if (!canTrainVisualPersona(user)) return;
     setPersona(prev => {
       if (!prev || !prev.hasVisualPersona) return prev;
-      return { ...prev, visualStatus: status };
+      return {
+        ...prev,
+        visualStatus: status,
+        status: status === 'ready' ? 'completed' : prev.status,
+      };
     });
   }, [user]);
 
@@ -134,6 +165,18 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
       return { ...prev, voiceStatus: status };
     });
   }, [user]);
+
+  const setPersonaStatus = useCallback((status: PersonaTrainingStatus, updates?: Partial<Persona>) => {
+    setPersona(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        status,
+        visualStatus: status === 'completed' ? 'ready' : prev.visualStatus,
+        ...(updates ?? {}),
+      };
+    });
+  }, []);
 
   const resetPersona = useCallback(() => {
     setPersona(null);
@@ -149,6 +192,7 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
     requestVoicePersona,
     setVisualStatus,
     setVoiceStatus,
+    setPersonaStatus,
     resetPersona,
   }), [
     persona,
@@ -160,6 +204,7 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
     requestVoicePersona,
     setVisualStatus,
     setVoiceStatus,
+    setPersonaStatus,
     resetPersona,
   ]);
 

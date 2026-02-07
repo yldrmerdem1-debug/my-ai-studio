@@ -1,5 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createGeminiModel, getGeminiModelId, resolveGeminiModelId } from '@/lib/gemini';
+
+const GEMINI_SYSTEM_PROMPT = `You are an expert AI Video Director. Your goal is to transform a short user idea into a production-ready asset package.
+1. Analyze the user's input.
+2. If the input is a simple action (e.g., 'walking on beach'), invent a short, engaging, 1st-person inner monologue (max 2 sentences) for the 'script'.
+3. Create a 'visual_prompt' that describes the scene cinematically. ALWAYS include the placeholder '{TRIGGER_WORD}' in the visual description. Add keywords like '4k, photorealistic, cinematic lighting, shallow depth of field'.
+4. Output MUST be a valid JSON object strictly following this structure:
+{
+  "script": "string",
+  "visual_prompt": "string"
+}
+DO NOT add any conversational text, markdown, or explanations. Just the JSON.`;
+
+const geminiModelId = resolveGeminiModelId(
+  process.env.GEMINI_AD_MODEL_ID || process.env.GEMINI_MODEL_ID,
+  'gemini-3-pro-preview'
+);
 
 export async function POST(request: NextRequest) {
   try {
@@ -19,8 +35,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Initialize Gemini
-    const genAI = new GoogleGenerativeAI(apiKey.trim());
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
+    const resolvedModelId = await getGeminiModelId(apiKey, geminiModelId);
+    const model = createGeminiModel(apiKey, resolvedModelId);
 
     const { prompt, context } = await request.json();
 
@@ -69,7 +85,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Build the full prompt for Gemini
-    const fullPrompt = `You are an expert copywriter specializing in creating compelling, persuasive ad scripts for marketing and advertising.
+    const fullPrompt = `${GEMINI_SYSTEM_PROMPT}
+
+You are an expert copywriter specializing in creating compelling, persuasive ad scripts for marketing and advertising.
 
 Create an engaging, high-converting ad script based on the following description and requirements:
 
