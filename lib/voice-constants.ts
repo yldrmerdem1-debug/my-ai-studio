@@ -1,8 +1,17 @@
+// ElevenLabs Voice ID'leri (Bunlar en iyi modellerdir)
 export const VOICE_CAST: Record<string, string> = {
-  // ELEVENLABS VOICE ID'LERİ (Örneklerdir, kendi favorilerini koy)
-  young_male_american: 'ErXwobaYiN019PkySvjV', // Antoni
-  old_male_american: 'TxGEqnHWrfWFTfGW9XjX', // Josh (Derin, yaşlı)
-  young_female_american: 'EXAVITQu4vr4xnSDxMaL', // Bella
-  old_female_american: 'FGY2WhTYq4uNrI2i4RYj', // Grandma (Örnek)
-  middle_aged_male_british: '5Q0t7uMcQlclAQf4h3d', // British Narrator
+  // ERKEKLER
+  male_heroic: 'ErXwobaYiN019PkySvjV', // (Cesur, Genç, Film Yıldızı)
+  male_villain: 'TxGEqnHWrfWFTfGW9XjX', // (Kötü, Derin, Tehditkar)
+  male_soft_calm: 'N2lVS1w4EjpYWWo36d9t', // (Terapist, Sakin, Güvenilir)
+  male_aggressive: 'TxGEqnHWrfWFTfGW9XjX', // (Bağıran, Asker, Agresif)
+
+  // KADINLAR
+  female_seductive: 'EXAVITQu4vr4xnSDxMaL', // (Çekici, Yumuşak)
+  female_news_anchor: '21m00Tcm4TlvDq8ikWAM', // (Otoriter, Net)
+  female_scared: 'EXAVITQu4vr4xnSDxMaL', // (Titrek, Nefes nefese)
 };
+
+// SFX Kalite Anahtarları (Bunu her promptun sonuna ekleyeceğiz)
+export const SFX_QUALITY_SUFFIX =
+  ', high fidelity, stereo, cinematic mixing, crystal clear audio, no background noise';

@@ -73,7 +73,8 @@ export async function POST(request: NextRequest) {
     };
     const filename = `${sanitizeFilename(personaName)}.zip`;
     const uploadForm = new FormData();
-    const zipBlob = new Blob([zipBuffer], { type: 'application/zip' });
+    const zipPart: BlobPart = Buffer.isBuffer(zipBuffer) ? new Uint8Array(zipBuffer) : zipBuffer;
+    const zipBlob = new Blob([zipPart], { type: 'application/zip' });
     uploadForm.append('content', zipBlob, filename);
 
     const zipResponse = await fetch('https://api.replicate.com/v1/files', {

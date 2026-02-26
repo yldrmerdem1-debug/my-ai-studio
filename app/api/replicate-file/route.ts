@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { downloadMediaWithValidation } from '@/lib/replicate-media';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -12,36 +13,28 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'API token not configured' }, { status: 500 });
   }
 
-  const apiUrl = `https://api.replicate.com/v1/files/${fileId}`;
-  const range = request.headers.get('range');
-  const upstreamHeaders: Record<string, string> = {
-    Authorization: `Bearer ${apiToken.trim()}`,
-  };
-  if (range) {
-    upstreamHeaders.Range = range;
-  }
-
-  const fileResponse = await fetch(apiUrl, {
-    headers: upstreamHeaders,
-  });
-
-  if (!fileResponse.ok) {
-    const errorText = await fileResponse.text();
+  try {
+    const apiUrl = `https://api.replicate.com/v1/files/${fileId}`;
+    const media = await downloadMediaWithValidation(apiUrl, {
+      token: apiToken.trim(),
+      strictExpectedKind: false,
+      logger: {
+        info: (...args) => console.log(...args),
+        warn: (...args) => console.warn(...args),
+      },
+    });
+    const headers = new Headers();
+    headers.set('Content-Type', media.contentType || 'application/octet-stream');
+    headers.set('Content-Length', String(media.buffer.byteLength));
+    headers.set('Cache-Control', 'private, max-age=300');
+    return new NextResponse(new Uint8Array(media.buffer), {
+      status: 200,
+      headers,
+    });
+  } catch (error: any) {
     return NextResponse.json(
-      { error: `Replicate file fetch failed: ${fileResponse.status} ${errorText}` },
-      { status: fileResponse.status }
+      { error: error?.message || 'Replicate file fetch failed' },
+      { status: 502 }
     );
   }
-
-  const headers = new Headers();
-  const contentType = fileResponse.headers.get('content-type');
-  const contentLength = fileResponse.headers.get('content-length');
-  if (contentType) headers.set('Content-Type', contentType);
-  if (contentLength) headers.set('Content-Length', contentLength);
-  headers.set('Cache-Control', 'private, max-age=300');
-
-  return new NextResponse(fileResponse.body, {
-    status: fileResponse.status,
-    headers,
-  });
 }

@@ -20,7 +20,8 @@ export async function POST(request: NextRequest) {
       format,
     });
 
-    const response = new NextResponse(voice.buffer, {
+    const responseBody: BodyInit = Buffer.isBuffer(voice.buffer) ? new Uint8Array(voice.buffer) : voice.buffer;
+    const response = new NextResponse(responseBody, {
       status: 200,
       headers: {
         'Content-Type': voice.mimeType,

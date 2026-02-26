@@ -1,14 +1,85 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
-import { upsertPersona, type PersonaRecord } from '@/lib/persona-registry';
+import { readPersonas, upsertPersona, type PersonaRecord } from '@/lib/persona-registry';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
+import { downloadMediaWithValidation } from '@/lib/replicate-media';
+import { resolveReplicateDownloadUrl } from '@/lib/replicate-media';
+import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
+import HuggingFaceService from '@/lib/huggingface-service';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 const isMissingColumn = (error: any, column: string) => {
   const message = String(error?.message || error || '');
-  return message.toLowerCase().includes(`column "${column}"`) && message.toLowerCase().includes('does not exist');
+  const lower = message.toLowerCase();
+  const colLower = String(column || '').toLowerCase();
+  // PostgREST can report missing columns in multiple formats.
+  return (
+    (lower.includes(`column "${colLower}"`) && lower.includes('does not exist'))
+    || lower.includes(`could not find the '${colLower}' column`)
+    || lower.includes(`could not find the "${colLower}" column`)
+  );
+};
+
+const isLocalLikeUrl = (value: string) =>
+  value.startsWith('/')
+  || value.includes('localhost')
+  || value.includes('127.0.0.1')
+  || value.includes('0.0.0.0');
+
+const isProbablySafetensorsPath = (value: string) =>
+  typeof value === 'string' && value.trim().toLowerCase().endsWith('.safetensors');
+
+const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+const isGender = (value: unknown): value is 'male' | 'female' => value === 'male' || value === 'female';
+
+const resolveWeightsSource = (personaData: any) => {
+  const weightsUrl =
+    safeTrim(personaData?.weightsUrl)
+    || safeTrim(personaData?.weights_url)
+    || safeTrim(personaData?.weightsURL)
+    || safeTrim(personaData?.loraWeightsUrl)
+    || safeTrim(personaData?.lora_weights_url)
+    || safeTrim(personaData?.lora_weights);
+
+  const localWeightsPath =
+    safeTrim(personaData?.localWeightsPath)
+    || safeTrim(personaData?.weightsPath)
+    || safeTrim(personaData?.safetensorsPath)
+    || safeTrim(personaData?.safetensors_path)
+    || safeTrim(personaData?.localSafetensorsPath);
+
+  return { weightsUrl, localWeightsPath };
+};
+
+const resolveWeightsUrlFromReplicateTraining = async (trainingId: string, token: string) => {
+  const id = safeTrim(trainingId);
+  if (!id) return '';
+  if (!token?.trim()) return '';
+  const response = await fetch(`https://api.replicate.com/v1/trainings/${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Token ${token.trim()}` },
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    console.warn('[save-persona] replicate training lookup failed', response.status, text.slice(0, 300));
+    return '';
+  }
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  const output = payload?.output ?? {};
+  const weights =
+    (typeof output?.weights === 'string' ? output.weights : '')
+    || (typeof output?.weights_url === 'string' ? output.weights_url : '')
+    || '';
+  return safeTrim(weights);
 };
 
 export async function POST(request: NextRequest) {
@@ -45,16 +116,141 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // --- Optional: Upload LoRA weights to Hugging Face and persist the resolve URL ---
+    // Supports:
+    // - Replicate file URLs (https://api.replicate.com/v1/files/...)
+    // - Public HTTP(S) URLs to .safetensors
+    // - Local server file paths to .safetensors
+    let { weightsUrl: weightsUrlInput, localWeightsPath } = resolveWeightsSource(personaData);
+    const existingHuggingFaceUrl = safeTrim(personaData?.huggingFaceUrl) || safeTrim(personaData?.huggingface_url);
+
+    // If caller didn't provide a direct weights URL but we have a Replicate training id, try to resolve weights_url.
+    if (!weightsUrlInput && !localWeightsPath) {
+      const replicateToken = process.env.REPLICATE_API_TOKEN || '';
+      const trainingId = safeTrim(personaData?.trainingId) || safeTrim(personaData?.training_id);
+      if (trainingId) {
+        weightsUrlInput = await resolveWeightsUrlFromReplicateTraining(trainingId, replicateToken);
+      }
+    }
+
+    const shouldUploadWeights = Boolean((weightsUrlInput || localWeightsPath) && !existingHuggingFaceUrl);
+
+    let huggingFaceUrlToPersist = existingHuggingFaceUrl;
+    let tempWeightsPath: string | null = null;
+    if (shouldUploadWeights) {
+      const repoId = 'shah1112/seedance-loras';
+      const hf = new HuggingFaceService();
+
+      // Resolve weights to a local file path (download if needed).
+      let uploadPath = localWeightsPath;
+      if (!uploadPath && weightsUrlInput) {
+        const token = process.env.REPLICATE_API_TOKEN || '';
+        const media = await downloadMediaWithValidation(weightsUrlInput, {
+          token,
+          strictExpectedKind: false,
+          logger: {
+            info: (...args) => console.log(...args),
+            warn: (...args) => console.warn(...args),
+          },
+        });
+        const ext = isProbablySafetensorsPath(weightsUrlInput)
+          ? 'safetensors'
+          : 'safetensors';
+        tempWeightsPath = path.join(os.tmpdir(), `lora-${personaData.personaId}-${Date.now()}.${ext}`);
+        await fs.writeFile(tempWeightsPath, media.buffer);
+        uploadPath = tempWeightsPath;
+      }
+
+      if (!uploadPath) {
+        return NextResponse.json(
+          { error: 'Missing LoRA weights source (weightsUrl or localWeightsPath).', code: 'LORA_SOURCE_MISSING' },
+          { status: 400 }
+        );
+      }
+
+      // Upload into a deterministic repo subpath so multiple personas can coexist.
+      const remoteFileName = path.basename(uploadPath);
+      const remotePath = `personas/${personaData.personaId}/${remoteFileName}`;
+
+      try {
+        huggingFaceUrlToPersist = await hf.uploadLoRA(uploadPath, repoId, {
+          repoType: 'dataset',
+          branch: 'main',
+          remotePath,
+        });
+      } catch (error: any) {
+        console.error('Hugging Face LoRA upload failed:', error);
+        return NextResponse.json(
+          { error: error?.message || 'Hugging Face upload failed', code: 'HF_UPLOAD_FAILED' },
+          { status: 502 }
+        );
+      } finally {
+        // Cleanup temporary local files we created (never delete arbitrary user paths).
+        if (tempWeightsPath) {
+          try {
+            await fs.unlink(tempWeightsPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
     const imageUrl = typeof personaData.image_url === 'string'
       ? personaData.image_url.trim()
       : typeof personaData.imageUrl === 'string'
         ? personaData.imageUrl.trim()
         : '';
-    if (!imageUrl) {
-      return NextResponse.json(
-        { error: 'Image upload failed. Please try again.' },
-        { status: 400 }
-      );
+    let storagePath = typeof personaData.storage_path === 'string'
+      ? personaData.storage_path.trim()
+      : typeof personaData.storagePath === 'string'
+        ? personaData.storagePath.trim()
+        : '';
+    // Do not hard-fail on missing image URL: persona should still be persisted (at least locally)
+    // and appear in lists, even if preview image upload failed.
+
+    let persistedImageUrl = imageUrl;
+    if (!storagePath && (imageUrl.includes('api.replicate.com/v1/files/') || isLocalLikeUrl(imageUrl))) {
+      try {
+        const token = process.env.REPLICATE_API_TOKEN || '';
+        const absoluteImageUrl = imageUrl.startsWith('/')
+          ? new URL(imageUrl, request.nextUrl.origin).toString()
+          : imageUrl;
+        // Replicate files endpoints sometimes return JSON metadata for non-image assets (e.g. ZIP).
+        // Resolve to a direct downloadable URL before attempting validation.
+        const resolvedUrl = absoluteImageUrl.includes('api.replicate.com/v1/files/')
+          ? await resolveReplicateDownloadUrl(absoluteImageUrl, {
+            token,
+            logger: {
+              info: (...args) => console.log(...args),
+              warn: (...args) => console.warn(...args),
+            },
+          })
+          : absoluteImageUrl;
+        const media = await downloadMediaWithValidation(resolvedUrl, {
+          token,
+          expectedKind: 'image',
+          strictExpectedKind: true,
+          logger: {
+            info: (...args) => console.log(...args),
+            warn: (...args) => console.warn(...args),
+          },
+        });
+        const provider = getStorageProvider();
+        storagePath = makeStorageObjectKey(`personas/${userCheck.userId}`, media.contentType, 'persona.jpg');
+        await provider.upload(media.buffer, media.contentType, storagePath);
+        persistedImageUrl = await provider.getSignedUrl(storagePath, 60 * 60 * 6);
+      } catch (error) {
+        console.warn('Persona image storage copy skipped:', error);
+      }
+    } else if (storagePath) {
+      try {
+        const provider = getStorageProvider();
+        persistedImageUrl = await provider.getSignedUrl(storagePath, 60 * 60 * 6);
+      } catch (error) {
+        console.warn('Persona storage_path signed URL resolve failed:', error);
+      }
     }
 
     const record: PersonaRecord = {
@@ -62,13 +258,18 @@ export async function POST(request: NextRequest) {
       userId: userCheck.userId,
       name: personaData.name,
       triggerWord: personaData.triggerWord,
+      gender: isGender(personaData.gender) ? personaData.gender : (isGender(personaData?.persona_gender) ? personaData.persona_gender : undefined),
       modelId: personaData.modelId,
       trainingId: personaData.trainingId,
       createdAt: personaData.createdAt,
       imageCount: personaData.imageCount,
-      imageUrl,
+      imageUrl: persistedImageUrl || undefined,
+      storagePath: storagePath || undefined,
       status: personaData.status ?? 'training',
       visualStatus: personaData.visualStatus ?? 'ready',
+      // Persist HF URL in both fields for compatibility.
+      huggingFaceUrl: huggingFaceUrlToPersist || undefined,
+      weightsUrl: huggingFaceUrlToPersist || personaData.weightsUrl || personaData.weights_url || undefined,
     };
 
     await upsertPersona(record);
@@ -83,8 +284,9 @@ export async function POST(request: NextRequest) {
         persona: record,
       });
     }
+    const statusStr = record.status as string | undefined;
     const normalizedStatus =
-      record.status === 'active' ? 'completed' : record.status ?? 'training';
+      statusStr === 'active' ? 'completed' : (record.status ?? 'training');
     const buildMatchParts = (includeTrainingId: boolean) => {
       const parts: string[] = [];
       if (includeTrainingId && record.trainingId) parts.push(`training_id.eq.${record.trainingId}`);
@@ -135,18 +337,32 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const basePayload = {
+    const basePayload: Record<string, any> = {
       user_id: record.userId,
       model_id: record.modelId,
       name: record.name,
       trigger_word: record.triggerWord,
+      gender: record.gender,
       status: normalizedStatus,
       created_at: record.createdAt ?? new Date().toISOString(),
-      image_url: imageUrl,
+      ...(record.imageUrl ? { image_url: record.imageUrl } : {}),
+      storage_path: record.storagePath,
+      // Optional HF weights link fields. These columns might not exist; we handle that below.
+      weights_url: record.weightsUrl,
+      huggingface_url: record.huggingFaceUrl,
+      // Alternate camelCase column names for some setups (best-effort).
+      weightsUrl: record.weightsUrl,
+      huggingFaceUrl: record.huggingFaceUrl,
     };
     const payloadWithTrainingId = record.trainingId
       ? { ...basePayload, training_id: record.trainingId }
       : basePayload;
+    const payloadWithoutStoragePath = Object.fromEntries(
+      Object.entries(payloadWithTrainingId).filter(([key]) => key !== 'storage_path')
+    );
+    const payloadWithoutGender = Object.fromEntries(
+      Object.entries(payloadWithTrainingId).filter(([key]) => key !== 'gender')
+    );
 
     if (existingQuery.data?.id) {
       let updateResult = await supabase
@@ -157,6 +373,29 @@ export async function POST(request: NextRequest) {
         updateResult = await supabase
           .from('personas')
           .update(basePayload)
+          .eq('id', existingQuery.data.id);
+      }
+      if (updateResult.error && isMissingColumn(updateResult.error, 'storage_path')) {
+        updateResult = await supabase
+          .from('personas')
+          .update(payloadWithoutStoragePath)
+          .eq('id', existingQuery.data.id);
+      }
+      if (updateResult.error && (isMissingColumn(updateResult.error, 'weights_url') || isMissingColumn(updateResult.error, 'huggingface_url'))) {
+        const payloadWithoutWeights = Object.fromEntries(
+          Object.entries(payloadWithTrainingId).filter(([key]) =>
+            key !== 'weights_url' && key !== 'huggingface_url' && key !== 'weightsUrl' && key !== 'huggingFaceUrl'
+          )
+        );
+        updateResult = await supabase
+          .from('personas')
+          .update(payloadWithoutWeights)
+          .eq('id', existingQuery.data.id);
+      }
+      if (updateResult.error && isMissingColumn(updateResult.error, 'gender')) {
+        updateResult = await supabase
+          .from('personas')
+          .update(payloadWithoutGender)
           .eq('id', existingQuery.data.id);
       }
       const updateError = updateResult.error;
@@ -177,6 +416,26 @@ export async function POST(request: NextRequest) {
         insertResult = await supabase
           .from('personas')
           .insert(basePayload);
+      }
+      if (insertResult.error && isMissingColumn(insertResult.error, 'storage_path')) {
+        insertResult = await supabase
+          .from('personas')
+          .insert(payloadWithoutStoragePath);
+      }
+      if (insertResult.error && (isMissingColumn(insertResult.error, 'weights_url') || isMissingColumn(insertResult.error, 'huggingface_url'))) {
+        const payloadWithoutWeights = Object.fromEntries(
+          Object.entries(payloadWithTrainingId).filter(([key]) =>
+            key !== 'weights_url' && key !== 'huggingface_url' && key !== 'weightsUrl' && key !== 'huggingFaceUrl'
+          )
+        );
+        insertResult = await supabase
+          .from('personas')
+          .insert(payloadWithoutWeights);
+      }
+      if (insertResult.error && isMissingColumn(insertResult.error, 'gender')) {
+        insertResult = await supabase
+          .from('personas')
+          .insert(payloadWithoutGender);
       }
       const insertError = insertResult.error;
       if (insertError) {
@@ -239,18 +498,71 @@ export async function GET(request: NextRequest) {
     }
     console.log('📦 API FETCHED PERSONAS (Sample):', (data ?? [])[0]);
 
-    const normalized = (data ?? []).map((persona: any) => ({
-      ...persona,
-      id: persona.id ?? persona.personaId ?? persona.persona_id,
-      name: persona.name ?? persona.persona_name ?? persona.display_name,
-      triggerWord: persona.triggerWord ?? persona.trigger_word,
-      trigger_word: persona.trigger_word ?? persona.triggerWord,
-      imageUrl: persona.imageUrl ?? persona.image_url,
-      image_url: persona.image_url ?? persona.imageUrl,
-      status: persona.status === 'active' ? 'completed' : persona.status,
+    const storagePath = (p: any) => p.storagePath ?? p.storage_path;
+    const rawImageUrl = (p: any) => p.imageUrl ?? p.image_url;
+
+    const normalizedSupabase = await Promise.all((data ?? []).map(async (persona: any) => {
+      let imageUrl = rawImageUrl(persona);
+      const path = storagePath(persona);
+      if (path && typeof path === 'string') {
+        try {
+          const provider = getStorageProvider();
+          const signed = await provider.getSignedUrl(path, 60 * 60 * 24);
+          if (signed) imageUrl = signed;
+        } catch (e) {
+          console.warn('Persona signed URL failed for', persona.id, (e as Error)?.message);
+        }
+      }
+      return {
+        ...persona,
+        id: persona.id ?? persona.personaId ?? persona.persona_id,
+        name: persona.name ?? persona.persona_name ?? persona.display_name,
+        triggerWord: persona.triggerWord ?? persona.trigger_word,
+        trigger_word: persona.trigger_word ?? persona.triggerWord,
+        imageUrl: imageUrl ?? persona.imageUrl ?? persona.image_url,
+        image_url: imageUrl ?? persona.image_url ?? persona.imageUrl,
+        storagePath: persona.storagePath ?? persona.storage_path,
+        storage_path: persona.storage_path ?? persona.storagePath,
+        status: persona.status === 'active' ? 'completed' : persona.status,
+      };
     }));
 
-    return NextResponse.json({ personas: normalized });
+    // Merge local personas so newly trained personas always appear even if Supabase insert fails.
+    const local = await readPersonas().catch(() => []);
+    const localFiltered = (userId ? local.filter(p => p.userId === userId) : local)
+      .filter((p) => p.status !== 'failed');
+    const localNormalized = localFiltered.map((p) => ({
+      id: p.personaId,
+      user_id: p.userId,
+      model_id: p.modelId ?? p.trainingId ?? p.personaId,
+      training_id: p.trainingId ?? null,
+      name: p.name ?? null,
+      trigger_word: p.triggerWord ?? null,
+      triggerWord: p.triggerWord ?? null,
+      image_url: p.imageUrl ?? null,
+      imageUrl: p.imageUrl ?? null,
+      storage_path: p.storagePath ?? null,
+      storagePath: p.storagePath ?? null,
+      status: p.status ?? 'training',
+      type: 'visual',
+      created_at: p.createdAt ?? null,
+    }));
+
+    const byKey = (row: any) => row?.training_id ?? row?.model_id ?? row?.id;
+    const map = new Map<string, any>();
+    for (const row of localNormalized) {
+      const key = String(byKey(row) || row.id || '');
+      if (key) map.set(key, row);
+    }
+    for (const row of normalizedSupabase) {
+      if (String(row?.status || '').toLowerCase() === 'failed') continue;
+      const key = String(byKey(row) || row.id || '');
+      if (!key) continue;
+      const prev = map.get(key);
+      map.set(key, prev ? { ...prev, ...row } : row);
+    }
+
+    return NextResponse.json({ personas: Array.from(map.values()) });
   } catch (error: any) {
     console.error('Get personas error:', error);
     return NextResponse.json(

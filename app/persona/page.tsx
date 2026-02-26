@@ -18,6 +18,7 @@ export default function PersonaPage() {
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [personaName, setPersonaName] = useState('');
+  const [gender, setGender] = useState<'' | 'male' | 'female'>('');
   const [triggerWord, setTriggerWord] = useState<string>('');
   const [trainingId, setTrainingId] = useState<string>('');
   const [isTrainingComplete, setIsTrainingComplete] = useState(false);
@@ -57,6 +58,14 @@ export default function PersonaPage() {
   const FORCE_PREMIUM_PREVIEW = true;
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const clearSelectedTrainingId = useCallback(() => {
+    setSelectedPersonaId(null);
+    setTrainingId('');
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('selectedPersonaTrainingId');
+    }
+  }, []);
+
   const handleCancelTraining = async (personaKey: string, dbId?: string | null) => {
     if (!window.confirm('Bu eğitimi iptal etmek istediğinize emin misiniz?')) return;
 
@@ -67,9 +76,9 @@ export default function PersonaPage() {
       await fetch(`/api/persona/training-status?id=${encodeURIComponent(personaKey)}`, {
         method: 'POST',
       });
-      setIsTraining(false);
-      setIsTrainingIndeterminate(false);
-      setTrainingStatus('Eğitim iptal edildi');
+      clearTrainingUi('Eğitim iptal edildi');
+      clearSelectedTrainingId();
+      refreshPersonas();
     } catch (error) {
       console.error('Cancel failed:', error);
     } finally {
@@ -147,6 +156,7 @@ export default function PersonaPage() {
   }, [dbPersonas]);
 
   const activeTraining = trainedPersonas.find(item => item.status === 'training') ?? null;
+  const showTrainingBanner = Boolean(activeTraining || selectedPersonaId || isUploadingImages);
 
   useEffect(() => {
     if (!activeTraining) return;
@@ -161,6 +171,15 @@ export default function PersonaPage() {
       setIsTrainingIndeterminate(true);
     }
   }, [activeTraining]);
+
+  const clearTrainingUi = useCallback((message?: string) => {
+    setIsTraining(false);
+    setIsTrainingIndeterminate(false);
+    setTrainingProgress(0);
+    setIsTrainingComplete(false);
+    setTrainingError(null);
+    setTrainingStatus(message ?? '');
+  }, []);
   const getDeletedPersonaIds = () => {
     if (typeof window === 'undefined') return new Set<string>();
     const raw = localStorage.getItem('deleted_person_ids');
@@ -340,6 +359,7 @@ export default function PersonaPage() {
       setPersonaStatus('completed');
       setIsTrainingComplete(true);
       setTrainingError(null);
+      clearSelectedTrainingId();
       if (personaId) {
         setTrainedPersonas(prev => prev.map(item => (
           item.id === personaId ? { ...item, dbStatus: 'completed', status: 'trained', progress: 100 } : item
@@ -362,6 +382,7 @@ export default function PersonaPage() {
       setIsTraining(false);
       setVisualStatus('none');
       setPersonaStatus('failed');
+      clearSelectedTrainingId();
       if (personaId) {
         setTrainedPersonas(prev => prev.map(item => (
           item.id === personaId ? { ...item, dbStatus: 'failed', status: 'failed', progress: null } : item
@@ -375,7 +396,7 @@ export default function PersonaPage() {
     setIsTrainingIndeterminate(true);
     setTrainingStatus('Persona eğitiliyor');
     setTrainingError(null);
-  }, [refreshPersonas, setPersonaStatus, setVisualStatus, stopPolling]);
+  }, [clearSelectedTrainingId, refreshPersonas, setPersonaStatus, setVisualStatus, stopPolling]);
 
   const fetchTrainingStatus = useCallback(async (personaId: string) => {
     try {
@@ -401,6 +422,7 @@ export default function PersonaPage() {
         if (data?.error === 'not_found') {
           stopPolling();
           setSelectedPersonaId(null);
+          clearTrainingUi('Eğitim bulunamadı veya iptal edildi');
           return;
         }
         applyTrainingStatus(data.status, data.error, personaId);
@@ -408,7 +430,7 @@ export default function PersonaPage() {
         console.error('Polling error:', error);
       }
     }, 5000);
-  }, [applyTrainingStatus, fetchTrainingStatus]);
+  }, [applyTrainingStatus, fetchTrainingStatus, clearTrainingUi, stopPolling]);
 
   useEffect(() => {
     if (!selectedPersonaId) return;
@@ -420,6 +442,7 @@ export default function PersonaPage() {
         if (data?.error === 'not_found') {
           stopPolling();
           setSelectedPersonaId(null);
+          clearTrainingUi('Eğitim bulunamadı veya iptal edildi');
           return;
         }
         applyTrainingStatus(data.status, data.error, selectedPersonaId);
@@ -436,7 +459,7 @@ export default function PersonaPage() {
       isActive = false;
       stopPolling();
     };
-  }, [applyTrainingStatus, fetchTrainingStatus, selectedPersonaId, startPolling, stopPolling]);
+  }, [applyTrainingStatus, fetchTrainingStatus, selectedPersonaId, startPolling, stopPolling, clearTrainingUi]);
 
   const startTraining = async () => {
     if (!canTrainVisual) {
@@ -457,6 +480,11 @@ export default function PersonaPage() {
 
     if (!personaName.trim()) {
       alert('Please enter a persona name before training.');
+      return;
+    }
+
+    if (!gender) {
+      alert('Please select a gender (Erkek / Kadın) before training.');
       return;
     }
 
@@ -488,9 +516,13 @@ export default function PersonaPage() {
         formData.append('images', file, file.name);
       });
       formData.append('personaName', personaName.trim());
+      formData.append('personaId', String(personaId || ''));
+      formData.append('triggerWord', newTriggerWord);
+      formData.append('gender', gender);
+      formData.append('user', JSON.stringify(user ?? null));
 
       setIsUploadingImages(true);
-      const response = await fetch('/api/train', {
+      const response = await fetch('/api/train-persona', {
         method: 'POST',
         body: formData,
       });
@@ -546,6 +578,31 @@ export default function PersonaPage() {
         setTrainingStatus('');
         return;
       }
+
+      // Upload a preview image for the persona (use the first uploaded photo).
+      let previewImageUrl: string | null = null;
+      try {
+        const previewFile = uploadedFiles[0] ?? null;
+        if (previewFile) {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(new Error('Failed to read preview image.'));
+            reader.readAsDataURL(previewFile);
+          });
+          const previewRes = await fetch('/api/upload-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataUrl, userId: user?.id }),
+          });
+          const previewData = await previewRes.json().catch(() => ({}));
+          if (previewRes.ok && typeof previewData.publicUrl === 'string' && previewData.publicUrl.trim()) {
+            previewImageUrl = previewData.publicUrl.trim();
+          }
+        }
+      } catch (e) {
+        console.warn('Preview image upload failed (continuing):', e);
+      }
       setTrainingId(data.trainingId ?? '');
       setTrainingStatus('Persona eğitiliyor');
       setIsTrainingIndeterminate(true);
@@ -573,8 +630,10 @@ export default function PersonaPage() {
             triggerWord: newTriggerWord,
             modelId: data.trainingId,
             trainingId: data.trainingId,
-            image_url: uploadedImageUrl,
-            imageUrl: uploadedImageUrl,
+            gender,
+            // image_url should be a real image preview, not the ZIP/training input URL
+            image_url: previewImageUrl ?? '',
+            imageUrl: previewImageUrl ?? '',
             createdAt: new Date().toISOString(),
             status: 'training',
             visualStatus: 'training',
@@ -756,6 +815,20 @@ export default function PersonaPage() {
                   placeholder="e.g. My LinkedIn Avatar, Game Character, etc."
                   className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none placeholder-gray-500"
                 />
+              </div>
+              <div className="w-48">
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Cinsiyet (Zorunlu)
+                </label>
+                <select
+                  value={gender}
+                  onChange={(event) => setGender(event.target.value as '' | 'male' | 'female')}
+                  className="w-full glass rounded-lg px-4 py-3 text-white border border-white/10 focus:border-[#00d9ff]/50 focus:outline-none"
+                >
+                  <option value="" className="bg-[#0b1220]">Seçiniz</option>
+                  <option value="male" className="bg-[#0b1220]">Erkek</option>
+                  <option value="female" className="bg-[#0b1220]">Kadın</option>
+                </select>
               </div>
               <input
                 ref={fileInputRef}
@@ -1080,7 +1153,7 @@ export default function PersonaPage() {
           </div>
 
           {/* Cinematic Training Progress Screen */}
-          {(isTraining || activeTraining) && (
+          {showTrainingBanner && (
             <div className="relative glass rounded-2xl p-8 mb-8 overflow-hidden">
               {/* Animated background effect */}
               <div className="absolute inset-0 opacity-20">

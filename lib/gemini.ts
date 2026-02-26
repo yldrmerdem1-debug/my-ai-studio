@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-export const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
+export const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-2.5-flash';
 
 export const resolveGeminiModelId = (raw: string | undefined, fallback: string) => {
   const value = (raw ?? '').trim() || fallback;
@@ -50,12 +50,13 @@ export const getGeminiModelId = async (apiKey: string, preferred: string) => {
   }
 
   const fallbackOrder = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-3-flash',
     'gemini-3-pro-preview',
     'gemini-3.0-pro-preview-02-05',
     'gemini-3-pro',
-    'gemini-3-flash',
-    'gemini-2.5-flash',
-    'gemini-1.5-flash',
     'gemini-1.5-pro',
     'gemini-1.0-pro',
   ];

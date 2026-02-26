@@ -1,0 +1,181 @@
+# Multi-stage AI content pipeline: Image vs Video prompts
+
+## QUALITY LOCK (always enforce)
+
+All image and video prompts MUST respect:
+
+- **Character consistency** — same face, same body proportions, same outfit across frame and sequence.
+- **Realistic physics** — cloth, motion, impact behave believably.
+- **Cinematic motion** — professional film quality, no distortion, no cartoon.
+- **High realism** — photorealistic, professional film quality.
+
+Apply regardless of purpose type. No exceptions unless the user explicitly asks for stylized/cartoon.
+
+---
+
+## PURPOSE TYPES (classify and optimize per intent)
+
+Use to route and tailor prompts. One primary type per request:
+
+| Type | Use when |
+|------|----------|
+| **FIGHT / WAR / ACTION** | Combat, brawl, battle, stunt, violence, weapons. |
+| **ADVERTISEMENT / PROMOTION** | Product, brand, commercial, promo clip. |
+| **TALKING / CHAT / PODCAST** | Dialogue, interview, vlog, speaking to camera. |
+| **STORY / CINEMATIC SCENE** | Narrative moment, film scene, dramatic beat. |
+| **SOCIAL MEDIA PORTRAIT** | Profile shot, portrait, selfie-style, presence. |
+| **THREAT / INTIMIDATION** | Menacing, warning, standoff, tension. |
+| **HERO SHOT / ICONIC POSE** | Power pose, reveal, poster moment, iconic frame. |
+
+Optimize image and video prompts for the detected purpose (e.g. FIGHT → wide shot, impact, enemy reaction; HERO SHOT → iconic pose, dramatic lighting; TALKING → stable frame, face focus).
+
+---
+
+## Purpose-based image prompt engineer (same persona, different purposes)
+
+**TASK (copy-paste prompt for this role):**
+
+You are an AI visual prompt engineer. Your job is to generate **DIFFERENT** image prompts for the **SAME** persona, based on **DIFFERENT PURPOSES**.
+
+**RULES:**
+- The persona stays the same.
+- The visual intent, environment, pose, and mood MUST change by purpose.
+- Never reuse the same visual logic across purposes.
+- Always choose the most effective visual language for the purpose.
+
+**You will receive:**
+1) Persona  
+2) Purpose type  
+3) Short human intent  
+
+**You must output:** ONLY the image prompt.
+
+---
+
+**Expanded reference:**
+
+**Inputs:**
+1. **Persona** — character name or token (unchanged across outputs).
+2. **Purpose type** — one of: FIGHT/WAR/ACTION, ADVERTISEMENT/PROMOTION, TALKING/CHAT/PODCAST, STORY/CINEMATIC SCENE, SOCIAL MEDIA PORTRAIT, THREAT/INTIMIDATION, HERO SHOT/ICONIC POSE.
+3. **Short human intent** — what the user wants to see or convey.
+
+**Rules (same as above, enforced):**
+- The **persona stays the same** (same face, body, outfit identity).
+- **Visual intent, environment, pose, and mood MUST change by purpose** — do not copy the same scene across purposes.
+- **Never reuse the same visual logic across purposes** (e.g. do not use a fight alley for a podcast shot).
+- **Always choose the most effective visual language for the purpose.**
+
+**Per-purpose visual language (vary these):**
+
+| Purpose | Visual intent | Typical environment | Pose / framing | Mood |
+|--------|----------------|---------------------|----------------|------|
+| FIGHT / WAR / ACTION | Conflict, impact about to happen | Alley, warehouse, dojo, battlefield | Wide, full body, fight-ready stance, opponent in frame | Tension, aggression, power |
+| ADVERTISEMENT / PROMOTION | Sell, impress, brand | Studio, product set, clean backdrop, urban premium | Confident pose, product or logo context | Polished, aspirational, clear |
+| TALKING / CHAT / PODCAST | Speak, connect, interview | Studio, couch, desk, mic, soft backdrop | Medium shot, face focus, relaxed or engaged | Calm, conversational, present |
+| STORY / CINEMATIC SCENE | Narrative beat, emotion | Story-specific location (room, street, interior) | Acting moment, reaction, composition for drama | Dramatic, narrative, film still |
+| SOCIAL MEDIA PORTRAIT | Presence, profile, identity | Simple backdrop, outdoor, or styled set | Portrait or 3/4, flattering angle, direct or candid | Approachable, strong presence |
+| THREAT / INTIMIDATION | Menace, warning, standoff | Dark, confined, or imposing space | Dominant posture, looming angle, victim/opponent in frame | Cold, threatening, tension |
+| HERO SHOT / ICONIC POSE | Iconic, poster-worthy moment | Epic backdrop (skyline, storm, summit) | Single powerful pose, silhouette or hero angle | Triumphant, iconic, memorable |
+
+**Output:** ONLY the image prompt. No explanation, no preamble. One prompt per (persona + purpose + intent). QUALITY LOCK still applies (character consistency, realistic physics, cinematic, no cartoon, high realism).
+
+---
+
+## Pipeline overview
+
+1. **Input:** Short human intent (story idea).
+2. **Stage 1 – IMAGE prompt:** Convert intent → high-quality **IMAGE** generation prompt (Flux/reference frame).
+3. **Stage 2 – VIDEO prompt:** Convert same intent → high-quality **VIDEO** generation prompt (Veo/Grok I2V).
+
+Image and video prompts are **different** and must be **optimized separately**. Never use one prompt for both.
+
+---
+
+## IMAGE prompt rules (frozen frame)
+
+**TASK (use when generating image prompt from intent):**
+
+Generate a photorealistic, cinematic IMAGE prompt based on the INTENT.
+
+**IMAGE PROMPT RULES:**
+- This is a single frozen moment, like a cinematic film still.
+- The character must be fight-ready, action about to start.
+- Environment must match the action (dark alley, warehouse, city night, etc.).
+- No humor, no parody, no cartoon style.
+- Persona must be respected and taken seriously.
+- Lighting must be dramatic and cinematic.
+- Camera angle must enhance power and tension.
+- The image should look like the perfect starting frame for a fight video.
+
+**IMAGE PROMPT STRUCTURE:**
+1. **Persona identifier** — [persona token] or character name.
+2. **Camera angle and framing** — wide shot, low angle, over-shoulder, full body, etc.
+3. **Environment description** — location that matches the action.
+4. **Character pose and emotion** — fight-ready stance, tension, determination.
+5. **Lighting and mood** — dramatic, high contrast, neon, backlit, etc.
+6. **Style and quality tags** — photorealistic, 8k, cinematic, film still, etc.
+
+**OUTPUT:** ONLY the image prompt. No explanation, no preamble. One block of text. English. Copy-paste ready.
+
+---
+
+**Summary (for director/LLM):**
+- **Purpose:** A single frozen moment — the **fight-ready starting frame** (action about to start).
+- **Describes:** Composition, pose, lighting, environment, character placement. **No motion.**
+- **No humor, no parody, no cartoon.** Persona respected and taken seriously.
+- **Lighting:** Dramatic and cinematic. **Camera:** Angle enhances power and tension.
+- **Environment:** Must match the action (dark alley, warehouse, city night, dojo, rooftop, etc.).
+- **Persona:** Always include persona token; do not invent age or looks — only action and atmosphere.
+
+**Good example:** "Wide angle full body shot of [persona] in fighting stance, opponent in frame, rain-soaked alley, neon signs, high contrast, 8k."
+**Bad:** "Character runs and then punches" (motion belongs in video prompt).
+
+---
+
+## VIDEO prompt rules (motion)
+
+**Task:** Generate a cinematic VIDEO generation prompt based on the same intent. Output only the video prompt text.
+
+- **Assume the IMAGE is the starting reference frame** — video continues from that exact frame.
+- **Focus on:** motion, physics, timing, and camera movement.
+- **Duration:** 6–8 seconds unless specified otherwise.
+- **Character consistency:** Appearance must remain consistent with the image. No morphing, no face changes, no outfit changes.
+- **Action:** Must feel powerful and realistic.
+- **Camera:** Movement must enhance impact (e.g. slow push-in, slight shake, tracking shot).
+- **Forbidden:** No text, no subtitles, no watermark.
+- **Tone:** No comedy/cartoon unless requested. Same persona token as the image.
+- **Output:** Clean, direct, copy-paste ready. English.
+
+### VIDEO PROMPT STRUCTURE (order)
+
+1. **Scene continuation from the image** — how the frozen moment continues.
+2. **Character action description** — what the persona does (punch, kick, block, etc.).
+3. **Enemy reaction** — impact, stagger, fall, etc.
+4. **Camera movement** — tracking shot, push-in, slight shake, etc.
+5. **Motion speed and impact** — slow motion on contact, motion blur, weight of hits.
+6. **Cinematic realism constraints** — no morphing, consistent appearance, 8k, cinematic.
+
+**Good example (multi-line):**
+- Cinematic action sequence continuing from the reference image.
+- Character lunges forward with explosive force, delivering a single powerful punch.
+- Nearest opponent knocked back instantly, body flying backward realistically; others recoil in shock.
+- Camera: subtle handheld push-in with slight motion shake at impact.
+- Cloth and cape react naturally; realistic physics. Lighting remains dramatic and consistent.
+- Character face, body proportions, and outfit remain identical. No morphing, no face change, no text, no watermark. Duration 7 seconds, cinematic realism.
+
+**Good example (single line):** "Scene continues from reference image. Character lunges and delivers a powerful punch; opponent knocked back, others recoil. Handheld push-in with shake at impact. Cloth and cape react naturally, realistic physics. Face, body, outfit identical. No morphing, no text, no watermark. 7 seconds, 8k cinematic."
+
+**Bad:** Repeating only the static image description with no motion or camera.
+
+---
+
+## Implementation
+
+- **QUALITY LOCK** applies to every image_prompt and video_prompt (character consistency, same face/body/outfit, realistic physics, cinematic motion, no distortion/cartoon, high realism, professional film quality).
+- **Purpose type:** Classify intent as one of FIGHT/WAR/ACTION, ADVERTISEMENT/PROMOTION, TALKING/CHAT/PODCAST, STORY/CINEMATIC SCENE, SOCIAL MEDIA PORTRAIT, THREAT/INTIMIDATION, HERO SHOT/ICONIC POSE. Optimize prompts for that type.
+- **Gemini director** MUST output two fields:
+  - `image_prompt`: Optimized for Flux/reference image (frozen moment).
+  - `video_prompt`: Optimized for Veo/Grok (motion, camera, physics).
+- Fallback: If only one prompt is returned, use it for both and append a generic motion suffix to the video prompt.
+- Never use comedy or cartoon tone unless explicitly requested.
+- Persona consistency is critical in both prompts.

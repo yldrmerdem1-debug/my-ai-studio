@@ -50,7 +50,7 @@ export function usePersonas(userId?: string | null) {
       return;
     }
 
-    const baseItems = (payload?.personas ?? []).map((row: any) => {
+    const baseItems: PersonaItem[] = (payload?.personas ?? []).map((row: any) => {
       const dbStatus = normalizeDbStatus(row.status);
       const personaKey = row.training_id ?? row.model_id ?? row.id ?? row.persona_id ?? row.personaId;
       return {
@@ -72,7 +72,7 @@ export function usePersonas(userId?: string | null) {
       setPersonas(baseItems);
     }
 
-    const trainingItems = baseItems.filter(item => item.dbStatus === 'training');
+    const trainingItems = baseItems.filter((item: PersonaItem) => item.dbStatus === 'training');
     if (trainingItems.length === 0) {
       if (isMounted.current) setIsLoading(false);
       return;

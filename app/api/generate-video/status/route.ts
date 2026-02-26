@@ -1,36 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
+import { getJob } from '@/lib/async-video-jobs';
+import { fal } from '@fal-ai/client';
+import { extractFirstOutputUrl, getRunwayTask, normalizeRunwayTaskStatus } from '@/lib/runway';
+import { downloadMediaWithValidation } from '@/lib/replicate-media';
+import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
 
 export async function GET(request: NextRequest) {
   try {
-    // Get API token from environment
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-    
-    // Validate token exists
-    if (!apiToken || apiToken.trim() === '') {
-      console.error('REPLICATE_API_TOKEN not found in environment');
-      return NextResponse.json(
-        {
-          error: 'API token not configured',
-          details: 'Please set REPLICATE_API_TOKEN in your .env.local file and restart your dev server'
-        },
-        { status: 500 }
-      );
-    }
-
-    // Validate token format
-    if (!apiToken.startsWith('r8_')) {
-      return NextResponse.json(
-        { error: 'Invalid API token format' },
-        { status: 500 }
-      );
-    }
-
-    // Initialize Replicate client
-    const replicate = new Replicate({
-      auth: apiToken.trim(),
-    });
-
     const { searchParams } = new URL(request.url);
     const videoId = searchParams.get('id');
 
@@ -41,7 +18,188 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get video generation status
+    // Runway task id: runway:<taskId>
+    if (videoId.startsWith('runway:')) {
+      const taskId = videoId.slice('runway:'.length).trim();
+      if (!taskId) {
+        return NextResponse.json({ status: 'failed', progress: 0, statusMessage: 'Invalid Runway task id', error: 'Invalid task id', videoUrl: null, output: null });
+      }
+      const task = await getRunwayTask(taskId);
+      const normalized = normalizeRunwayTaskStatus(task?.status);
+      if (normalized === 'SUCCEEDED') {
+        const outputUrl = extractFirstOutputUrl(task?.output);
+        if (!outputUrl) {
+          return NextResponse.json({
+            status: 'failed',
+            progress: 0,
+            statusMessage: 'Runway succeeded but output URL is missing.',
+            error: 'Missing output URL',
+            videoUrl: null,
+            output: task ?? null,
+          });
+        }
+        // Best-effort: persist to our storage so URL won't expire.
+        let storedUrl = outputUrl;
+        try {
+          const media = await downloadMediaWithValidation(outputUrl, { expectedKind: 'video', strictExpectedKind: true });
+          const provider = getStorageProvider();
+          const key = makeStorageObjectKey('generated/runway', media.contentType || 'video/mp4', 'runway.mp4');
+          await provider.upload(media.buffer, media.contentType || 'video/mp4', key);
+          storedUrl = await provider.getSignedUrl(key, 60 * 60 * 24);
+        } catch (err) {
+          console.warn('Runway store failed; returning ephemeral URL.', (err as any)?.message || err);
+        }
+        return NextResponse.json({
+          status: 'succeeded',
+          progress: 1,
+          statusMessage: 'Video generation complete!',
+          error: null,
+          videoUrl: storedUrl,
+          output: task ?? null,
+        });
+      }
+      if (normalized === 'FAILED') {
+        return NextResponse.json({
+          status: 'failed',
+          progress: 0,
+          statusMessage: 'Runway generation failed.',
+          error: (task as any)?.error || 'Runway failed',
+          videoUrl: null,
+          output: task ?? null,
+        });
+      }
+      return NextResponse.json({
+        status: 'processing',
+        progress: normalized === 'PENDING' ? 0.1 : 0.5,
+        statusMessage: normalized === 'PENDING' ? 'Queued...' : 'Generating video...',
+        error: null,
+        videoUrl: null,
+        output: task ?? null,
+      });
+    }
+
+    // Async job (job_xxx): in-memory store from generate-video when body.async === true
+    if (videoId.startsWith('job_')) {
+      const job = getJob(videoId);
+      if (!job) {
+        return NextResponse.json({
+          status: 'starting',
+          progress: 0,
+          statusMessage: 'Job not found or expired.',
+          error: null,
+          videoUrl: null,
+          output: null,
+        });
+      }
+      if (job.status === 'pending') {
+        return NextResponse.json({
+          status: 'processing',
+          progress: 0.5,
+          statusMessage: 'Generating video...',
+          error: null,
+          videoUrl: null,
+          output: null,
+        });
+      }
+      if (job.status === 'failed') {
+        return NextResponse.json({
+          status: 'failed',
+          progress: 0,
+          statusMessage: job.error || 'Generation failed',
+          error: job.error || null,
+          videoUrl: null,
+          output: null,
+        });
+      }
+      const result = job.result || {};
+      const videoUrl = (result as { videoUrl?: string }).videoUrl ?? null;
+      return NextResponse.json({
+        status: 'succeeded',
+        progress: 1,
+        statusMessage: 'Video generation complete!',
+        error: null,
+        videoUrl,
+        output: result,
+      });
+    }
+
+    // fal queue id: fal:<urlEncodedModel>:<requestId>
+    if (videoId.startsWith('fal:')) {
+      const parts = videoId.split(':');
+      const modelEncoded = parts[1] || '';
+      const requestId = parts.slice(2).join(':');
+      const model = decodeURIComponent(modelEncoded);
+      const key = String(process.env.FAL_KEY || '').trim();
+      if (!key) {
+        return NextResponse.json(
+          { error: 'FAL_KEY not configured', status: 'error' },
+          { status: 500 }
+        );
+      }
+      fal.config({ credentials: key });
+      const st = await fal.queue.status(model, { requestId, logs: false } as any);
+      const status = String((st as any)?.status || '').toUpperCase();
+      if (status === 'COMPLETED') {
+        const result = await fal.queue.result(model, { requestId } as any);
+        const data = (result as any)?.data ?? result;
+        const videoUrl =
+          data?.video?.url
+          || data?.output?.video?.url
+          || data?.url
+          || null;
+        return NextResponse.json({
+          status: 'succeeded',
+          progress: 1,
+          statusMessage: 'Video generation complete!',
+          error: null,
+          videoUrl,
+          output: data ?? null,
+        });
+      }
+      if (status === 'FAILED' || status === 'CANCELED') {
+        const message = String((st as any)?.error || (st as any)?.message || 'Fal generation failed');
+        return NextResponse.json({
+          status: 'failed',
+          progress: 0,
+          statusMessage: message,
+          error: message,
+          videoUrl: null,
+          output: (st as any) ?? null,
+        });
+      }
+      return NextResponse.json({
+        status: 'processing',
+        progress: status === 'IN_QUEUE' ? 0.1 : 0.5,
+        statusMessage: status === 'IN_QUEUE' ? 'Queued...' : 'Generating video...',
+        error: null,
+        videoUrl: null,
+        output: (st as any) ?? null,
+      });
+    }
+
+    // Replicate prediction id (r8_xxx or similar)
+    const apiToken = process.env.REPLICATE_API_TOKEN;
+    if (!apiToken || apiToken.trim() === '') {
+      console.error('REPLICATE_API_TOKEN not found in environment');
+      return NextResponse.json(
+        {
+          error: 'API token not configured',
+          details: 'Please set REPLICATE_API_TOKEN in your .env.local file and restart your dev server'
+        },
+        { status: 500 }
+      );
+    }
+    if (!apiToken.startsWith('r8_')) {
+      return NextResponse.json(
+        { error: 'Invalid API token format' },
+        { status: 500 }
+      );
+    }
+
+    const replicate = new Replicate({
+      auth: apiToken.trim(),
+    });
+
     const prediction = await replicate.predictions.get(videoId);
 
     // Calculate progress based on status

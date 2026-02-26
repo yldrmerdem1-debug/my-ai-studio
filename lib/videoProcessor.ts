@@ -163,6 +163,19 @@ const mergeVideoAndAudio = async (videoPath: string, audioPath: string) => {
   return await fsPromises.readFile(outputPath);
 };
 
+const probeDurationSeconds = (filePath: string) => (
+  new Promise<number>((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (error, data) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      const duration = Number(data?.format?.duration);
+      resolve(Number.isFinite(duration) ? duration : 0);
+    });
+  })
+);
+
 export const mixVideoWithVoiceAndSfx = async ({
   videoUrl,
   voiceUrl,
@@ -235,6 +248,7 @@ export const mixVideoWithDucking = async ({
   voiceVolume = 1.0,
   sfxBedVolume = 0.6,
   duckedSfxVolume = 0.2,
+  audioEnvironment,
 }: {
   videoUrl: string;
   voiceUrl: string;
@@ -242,11 +256,18 @@ export const mixVideoWithDucking = async ({
   voiceVolume?: number;
   sfxBedVolume?: number;
   duckedSfxVolume?: number;
+  audioEnvironment?: string;
 }): Promise<VideoProcessorResult> => {
+  const safeSfx = typeof sfxUrl === 'string' ? sfxUrl.trim() : '';
+  // If SFX is unavailable (quota/network), gracefully fall back to voice-only merge.
+  if (!safeSfx) {
+    return await mergeVideoWithAudioUrl({ videoUrl, audioUrl: voiceUrl, audioVolume: voiceVolume });
+  }
+
   const [videoBuffer, voiceBuffer, sfxBuffer] = await Promise.all([
     fetchToBuffer(videoUrl),
     fetchToBuffer(voiceUrl),
-    fetchToBuffer(sfxUrl),
+    fetchToBuffer(safeSfx),
   ]);
 
   const [videoPath, voicePath, sfxPath] = await Promise.all([
@@ -259,6 +280,13 @@ export const mixVideoWithDucking = async ({
   const resolvedVoicePath = assertNonEmptyFile(voicePath, 'Voice');
   const resolvedSfxPath = assertNonEmptyFile(sfxPath, 'SFX');
 
+  const durationSeconds = await probeDurationSeconds(resolvedVideoPath);
+  const fadeOutStart = Math.max(0, durationSeconds - 1);
+  const shouldReverb = audioEnvironment === 'cave' || audioEnvironment === 'large_hall';
+  const voiceFilter = shouldReverb
+    ? `[1:a]volume=${voiceVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250,aecho=0.8:0.9:1000:0.3[voice]`
+    : `[1:a]volume=${voiceVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250[voice]`;
+
   const outputPath = path.resolve(os.tmpdir(), `duck-${crypto.randomUUID()}.mp4`);
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
@@ -268,7 +296,7 @@ export const mixVideoWithDucking = async ({
       .outputOptions([
         '-y',
         '-map [outv]',
-        '-map [aout]',
+        '-map [finala]',
         '-shortest',
         '-movflags +faststart',
         '-c:v libx264',
@@ -280,12 +308,11 @@ export const mixVideoWithDucking = async ({
         '-c:a aac',
       ])
       .complexFilter([
-        `[0:v]noise=alls=10:allf=t+u,vignette=PI/4[outv]`,
-        `[1:a]volume=${voiceVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250[voice]`,
-        `[2:a]volume=${sfxBedVolume}[sfxbed]`,
-        `[sfxbed][voice]sidechaincompress=threshold=0.05:ratio=6:attack=20:release=250[sfxduck]`,
-        `[sfxduck]volume=${duckedSfxVolume / Math.max(sfxBedVolume, 0.01)}[sfx]`,
-        '[voice][sfx]amix=inputs=2:normalize=0[aout]',
+        `[0:v]noise=alls=10:allf=t+u,vignette=PI/4,fade=t=out:st=${fadeOutStart}:d=1[outv]`,
+        voiceFilter,
+        `[2:a]volume=${sfxBedVolume}[bg]`,
+        `[voice][bg]amix=inputs=2:duration=longest:dropout_transition=2[aout]`,
+        `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
       ])
       .on('end', () => resolve())
       .on('error', (error, stdout, stderr) => {
@@ -325,6 +352,8 @@ export const mergeVideoWithAudioUrl = async ({
   const resolvedVideoPath = assertNonEmptyFile(videoPath, 'Video');
   const resolvedAudioPath = assertNonEmptyFile(audioPath, 'Audio');
 
+  const durationSeconds = await probeDurationSeconds(resolvedVideoPath);
+  const fadeOutStart = Math.max(0, durationSeconds - 1);
   const outputPath = path.resolve(os.tmpdir(), `merge-${crypto.randomUUID()}.mp4`);
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
@@ -333,7 +362,7 @@ export const mergeVideoWithAudioUrl = async ({
       .outputOptions([
         '-y',
         '-map [outv]',
-        '-map [aout]',
+        '-map [finala]',
         '-shortest',
         '-movflags +faststart',
         '-c:v libx264',
@@ -345,8 +374,9 @@ export const mergeVideoWithAudioUrl = async ({
         '-c:a aac',
       ])
       .complexFilter([
-        `[0:v]noise=alls=10:allf=t+u,vignette=PI/4[outv]`,
+        `[0:v]noise=alls=10:allf=t+u,vignette=PI/4,fade=t=out:st=${fadeOutStart}:d=1[outv]`,
         `[1:a]volume=${audioVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250[aout]`,
+        `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
       ])
       .on('end', () => resolve())
       .on('error', (error, stdout, stderr) => {
@@ -362,6 +392,53 @@ export const mergeVideoWithAudioUrl = async ({
     videoUrl: mergedUrl,
     audioMerged: true,
   };
+};
+
+export const concatVideos = async (videoUrls: string[]): Promise<string> => {
+  if (videoUrls.length === 0) throw new Error('No videos to concatenate');
+  if (videoUrls.length === 1) return videoUrls[0];
+
+  const videoBuffers = await Promise.all(videoUrls.map(url => fetchToBuffer(url)));
+  const videoPaths = await Promise.all(
+    videoBuffers.map((buffer, i) => writeTempFile(buffer, `shot-${i}.mp4`))
+  );
+
+  const resolvedPaths = videoPaths.map(p => assertNonEmptyFile(p, 'Video'));
+  const concatListPath = path.resolve(os.tmpdir(), `concat-${crypto.randomUUID()}.txt`);
+  const concatListContent = resolvedPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
+  await fsPromises.writeFile(concatListPath, concatListContent, 'utf-8');
+
+  const outputPath = path.resolve(os.tmpdir(), `concat-${crypto.randomUUID()}.mp4`);
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg()
+      .input(concatListPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions([
+        '-y',
+        '-c', 'copy',
+        '-movflags', '+faststart',
+      ])
+      .on('end', () => resolve())
+      .on('error', (error, stdout, stderr) => {
+        const details = stderr || stdout || '';
+        reject(new Error(`FFmpeg concat failed: ${error?.message || error}\n${details}`));
+      })
+      .save(outputPath);
+  });
+
+  const concatBuffer = await fsPromises.readFile(outputPath);
+  const concatUrl = await writePublicVideo(concatBuffer);
+  
+  // Cleanup temp files
+  try {
+    await Promise.all([
+      ...resolvedPaths.map(p => fsPromises.unlink(p).catch(() => {})),
+      fsPromises.unlink(concatListPath).catch(() => {}),
+      fsPromises.unlink(outputPath).catch(() => {}),
+    ]);
+  } catch {}
+
+  return concatUrl;
 };
 
 export const processVideoWithAudio = async ({

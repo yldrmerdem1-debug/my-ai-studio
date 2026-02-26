@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
       let loraWeights: string | null = null;
       if (trainingId) {
         const training = await replicate.trainings.get(trainingId);
-        const output = training?.output ?? {};
+        const output = (training?.output ?? {}) as { weights?: string; weights_url?: string };
         loraWeights = output?.weights ?? output?.weights_url ?? null;
         if (!loraWeights) {
           return NextResponse.json(
@@ -200,7 +200,11 @@ export async function POST(request: NextRequest) {
         version: model,
         input: {
           prompt: imagePrompt,
-          ...(loraWeights ? { lora_weights: loraWeights, lora_scale: 0.8 } : {}),
+          aspect_ratio: '16:9',
+          output_format: 'png',
+          output_quality: 100,
+          num_inference_steps: 50,
+          ...(loraWeights ? { lora_weights: loraWeights, lora_scale: 1.0 } : {}),
         },
       });
     } else if (action === 'studio-background') {

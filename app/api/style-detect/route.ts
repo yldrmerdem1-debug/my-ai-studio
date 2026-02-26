@@ -3,7 +3,7 @@ import { createGeminiModel, getGeminiModelId, resolveGeminiModelId } from '@/lib
 
 const geminiModelId = resolveGeminiModelId(
   process.env.GEMINI_MODEL_ID,
-  'gemini-3-pro-preview'
+  'gemini-2.5-flash'
 );
 
 const parseDataUrl = (value: string) => {

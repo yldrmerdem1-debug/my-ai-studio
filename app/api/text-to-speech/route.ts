@@ -11,7 +11,7 @@ import { createGeminiModel, getGeminiModelId, resolveGeminiModelId } from '@/lib
 let geminiTtsDisabled = false;
 const geminiModelId = resolveGeminiModelId(
   process.env.GEMINI_MODEL_ID,
-  'gemini-3-pro-preview'
+  'gemini-2.5-flash'
 );
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));

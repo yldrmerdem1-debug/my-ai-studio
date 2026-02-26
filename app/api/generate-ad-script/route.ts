@@ -14,7 +14,7 @@ DO NOT add any conversational text, markdown, or explanations. Just the JSON.`;
 
 const geminiModelId = resolveGeminiModelId(
   process.env.GEMINI_AD_MODEL_ID || process.env.GEMINI_MODEL_ID,
-  'gemini-3-pro-preview'
+  'gemini-2.5-flash'
 );
 
 export async function POST(request: NextRequest) {

@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
+import { isFaceSwapEnabled } from '@/lib/feature-flags';
+import { isTruthy } from '@/lib/consent';
 
 export async function POST(request: NextRequest) {
   try {
+    if (!isFaceSwapEnabled()) {
+      return NextResponse.json(
+        { error: 'Face swap is disabled' },
+        { status: 403 }
+      );
+    }
+
     const apiToken = process.env.REPLICATE_API_TOKEN;
     
     if (!apiToken || !apiToken.trim()) {
@@ -21,6 +30,14 @@ export async function POST(request: NextRequest) {
 
     const replicate = new Replicate({ auth: apiToken.trim() });
     const formData = await request.formData();
+
+    const consentRaw = formData.get('faceSwapConsent');
+    if (!isTruthy(consentRaw)) {
+      return NextResponse.json(
+        { error: 'Face swap consent is required' },
+        { status: 400 }
+      );
+    }
     
     const sourceImage = formData.get('image') as File;
     const targetImage = formData.get('targetImage') as File;

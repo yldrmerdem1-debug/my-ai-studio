@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
@@ -9,6 +9,7 @@ import { useToast } from '@/hooks/useToast';
 import PreviewArea from '@/components/PreviewArea';
 import { usePersona } from '@/hooks/usePersona';
 import { canUsePersona } from '@/lib/subscription';
+import { isPublicFaceSwapEnabled } from '@/lib/feature-flags';
 
 type ToolMode = 'background-remove' | 'studio-background' | 'face-identity' | null;
 
@@ -17,6 +18,7 @@ export default function StudioPage() {
   const { user, persona } = usePersona();
   const canUsePersonaFeatures = canUsePersona(user);
   const personaReady = persona?.status === 'completed';
+  const faceSwapUiEnabled = isPublicFaceSwapEnabled();
   const [selectedTool, setSelectedTool] = useState<ToolMode>(null);
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
@@ -25,6 +27,7 @@ export default function StudioPage() {
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [selectedModel, setSelectedModel] = useState<'instantid' | 'faceswap'>('instantid');
+  const [faceSwapConsent, setFaceSwapConsent] = useState(false);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
@@ -101,13 +104,13 @@ export default function StudioPage() {
       icon: Camera,
       iconColor: '#fbbf24',
     },
-    {
+    ...(faceSwapUiEnabled ? [{
       id: 'face-identity' as ToolMode,
       title: 'Face / Identity',
       description: 'Your face. Infinite scenes.',
       icon: User,
       iconColor: '#ff6b9d',
-    },
+    }] : []),
   ];
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -261,15 +264,26 @@ export default function StudioPage() {
       showToast('Please upload both source and target images', 'warning');
       return;
     }
+    if (!canUsePersonaFeatures) {
+      setIsPricingModalOpen(true);
+      showToast('Premium required for Face Swap.', 'warning');
+      return;
+    }
+    if (!faceSwapConsent) {
+      showToast('Please confirm consent to use face swap', 'warning');
+      return;
+    }
 
     setIsProcessing(true);
     setResultImage(null);
 
+    let startedPolling = false;
     try {
       const formData = new FormData();
       formData.append('image', sourceImage);
       formData.append('targetImage', targetImage);
       formData.append('model', selectedModel);
+      formData.append('faceSwapConsent', String(faceSwapConsent));
 
       const response = await fetch('/api/face-identity', {
         method: 'POST',
@@ -282,23 +296,52 @@ export default function StudioPage() {
       }
 
       const data = await response.json();
-      if (data.imageUrl) {
-        setResultImage(data.imageUrl);
-        
-        // Auto-save to My Assets
-        if (typeof window !== 'undefined') {
-          const { saveImageAsset } = await import('@/lib/assets-storage');
-          saveImageAsset(data.imageUrl, `Face Swap - ${new Date().toLocaleDateString()}`, {
-            model: selectedModel,
-          });
-        }
-        
-        showToast('Face swap completed successfully!', 'success');
+      if (data.predictionId) {
+        startedPolling = true;
+        const pollStart = Date.now();
+        const pollInterval = setInterval(async () => {
+          try {
+            if (Date.now() - pollStart > 60000) {
+              clearInterval(pollInterval);
+              setIsProcessing(false);
+              showToast('Processing timeout. Please try again.', 'warning');
+              return;
+            }
+            const statusResponse = await fetch(`/api/face-identity/status?predictionId=${data.predictionId}`);
+            const statusData = await statusResponse.json().catch(() => ({}));
+            if (!statusResponse.ok) {
+              throw new Error((statusData as any).error || 'Failed to check processing status');
+            }
+            if (statusData.status === 'succeeded' && statusData.output) {
+              clearInterval(pollInterval);
+              const resultUrl = Array.isArray(statusData.output) ? statusData.output[0] : statusData.output;
+              setResultImage(resultUrl);
+              if (typeof window !== 'undefined') {
+                const { saveImageAsset } = await import('@/lib/assets-storage');
+                saveImageAsset(resultUrl, `Face Swap - ${new Date().toLocaleDateString()}`, {
+                  model: selectedModel === 'instantid' ? 'subhash/instantid' : 'lucataco/faceswap',
+                });
+              }
+              setIsProcessing(false);
+              showToast('Face swap completed successfully!', 'success');
+            } else if (statusData.status === 'failed') {
+              clearInterval(pollInterval);
+              setIsProcessing(false);
+              showToast('Face swap failed: ' + (statusData.error || 'Unknown error'), 'error');
+            }
+          } catch (pollError: any) {
+            clearInterval(pollInterval);
+            setIsProcessing(false);
+            showToast(pollError?.message || 'Failed to check processing status', 'error');
+          }
+        }, 2000);
+      } else {
+        throw new Error(data.error || 'Failed to start face swap');
       }
     } catch (error: any) {
       showToast(error.message || 'Failed to swap faces', 'error');
     } finally {
-      setIsProcessing(false);
+      if (!startedPolling) setIsProcessing(false);
     }
   };
 
@@ -585,7 +628,7 @@ export default function StudioPage() {
                 </div>
               )}
 
-              {selectedTool === 'face-identity' && (
+              {faceSwapUiEnabled && selectedTool === 'face-identity' && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   <div className="glass rounded-2xl p-8">
                     <h3 className="text-xl font-semibold text-white mb-6">Face Swap</h3>
@@ -661,7 +704,7 @@ export default function StudioPage() {
                       </div>
                       <button
                         onClick={handleProcess}
-                        disabled={!sourceImage || !targetImage || isProcessing}
+                        disabled={!sourceImage || !targetImage || isProcessing || !faceSwapConsent || !canUsePersonaFeatures}
                         className="w-full px-6 py-4 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                       >
                         {isProcessing ? (
@@ -676,6 +719,17 @@ export default function StudioPage() {
                           </>
                         )}
                       </button>
+                      <label className="mt-4 flex items-start gap-2 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={faceSwapConsent}
+                          onChange={(e) => setFaceSwapConsent(e.target.checked)}
+                          className="mt-0.5 h-4 w-4 rounded border-white/20 bg-white/5 text-blue-500 focus:ring-2 focus:ring-blue-500"
+                        />
+                        <span>
+                          I confirm I have the legal right and explicit consent to use these faces for face swap, and I will not use third‑party/celebrity images without permission.
+                        </span>
+                      </label>
                     </div>
                   </div>
                   <PreviewArea

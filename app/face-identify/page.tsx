@@ -6,9 +6,12 @@ import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { User, Upload, Image as ImageIcon, Sparkles, Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/useToast';
+import { isPublicFaceSwapEnabled } from '@/lib/feature-flags';
 
 export default function FaceIdentifyPage() {
   const { showToast } = useToast();
+  const faceSwapUiEnabled = isPublicFaceSwapEnabled();
+  const [faceSwapConsent, setFaceSwapConsent] = useState(false);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
   const [targetImage, setTargetImage] = useState<File | null>(null);
   const [resultImage, setResultImage] = useState<string | null>(null);
@@ -30,6 +33,14 @@ export default function FaceIdentifyPage() {
   };
 
   const handleFaceSwap = async () => {
+    if (!faceSwapUiEnabled) {
+      showToast('Face swap is disabled', 'warning');
+      return;
+    }
+    if (!faceSwapConsent) {
+      showToast('Please confirm consent to use face swap', 'warning');
+      return;
+    }
     if (!sourceImage || !targetImage) {
       showToast('Please upload both source and target images', 'warning');
       return;
@@ -43,6 +54,7 @@ export default function FaceIdentifyPage() {
       formData.append('image', sourceImage);
       formData.append('targetImage', targetImage);
       formData.append('model', selectedModel);
+      formData.append('faceSwapConsent', String(faceSwapConsent));
 
       const response = await fetch('/api/face-identity', {
         method: 'POST',
@@ -109,6 +121,19 @@ export default function FaceIdentifyPage() {
       <PricingModal isOpen={isPricingModalOpen} onClose={() => setIsPricingModalOpen(false)} />
 
       <main className="relative z-10 ml-64">
+        {!faceSwapUiEnabled ? (
+          <div className="container mx-auto px-8 py-12">
+            <div className="glass rounded-2xl p-8">
+              <h1 className="text-2xl font-semibold text-white">Face Swap is disabled</h1>
+              <p className="mt-2 text-gray-400">
+                This feature is currently turned off.
+              </p>
+              <Link href="/" className="mt-4 inline-block text-[#00d9ff] hover:text-[#0099ff] transition-colors">
+                ← Back to Studio
+              </Link>
+            </div>
+          </div>
+        ) : (
         <div className="container mx-auto px-8 py-12">
           {/* Header */}
           <div className="mb-8">
@@ -216,7 +241,7 @@ export default function FaceIdentifyPage() {
                 </div>
                 <button
                   onClick={handleFaceSwap}
-                  disabled={isProcessing || !sourceImage || !targetImage}
+                  disabled={isProcessing || !sourceImage || !targetImage || !faceSwapConsent}
                   className="interactive-element try-now-button-modern w-full px-6 py-4 bg-gradient-to-r from-[#00d9ff] to-[#0099ff] text-white font-semibold rounded-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {isProcessing ? (
@@ -228,6 +253,17 @@ export default function FaceIdentifyPage() {
                     'Swap Faces'
                   )}
                 </button>
+                <label className="mt-4 flex items-start gap-2 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={faceSwapConsent}
+                    onChange={(e) => setFaceSwapConsent(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-white/20 bg-white/5 text-blue-500 focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span>
+                    I confirm I have the legal right and explicit consent to use these faces for face swap, and I will not use third‑party/celebrity images without permission.
+                  </span>
+                </label>
               </div>
 
               {resultImage && (
@@ -255,6 +291,7 @@ export default function FaceIdentifyPage() {
             </div>
           </div>
         </div>
+        )}
       </main>
     </div>
   );

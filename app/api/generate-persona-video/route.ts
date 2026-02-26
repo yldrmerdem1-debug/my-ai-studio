@@ -13,7 +13,7 @@ export const runtime = 'nodejs';
 const GEMINI_SYSTEM_INSTRUCTION = `You are a creative director. Convert the user input into a JSON object with two fields: 'script' (a natural, 1st-person monologue based on the input, ready for TTS) and 'visual_prompt' (a high-fidelity, cinematic image description including the trigger word). Do not include markdown formatting, return raw JSON.`;
 const geminiModelId = resolveGeminiModelId(
   process.env.GEMINI_MODEL_ID,
-  'gemini-3-pro-preview'
+  'gemini-2.5-flash'
 );
 
 type GeneratePersonaVideoRequest = {
@@ -123,7 +123,8 @@ const waitForPrediction = async (replicate: Replicate, predictionId: string) => 
       return videoUrl;
     }
     if (prediction.status === 'failed' || prediction.status === 'canceled') {
-      throw new Error(prediction.error || 'Replicate prediction failed');
+      const errMsg = prediction.error == null ? 'Replicate prediction failed' : typeof prediction.error === 'string' ? prediction.error : JSON.stringify(prediction.error);
+      throw new Error(errMsg);
     }
     await new Promise(resolve => setTimeout(resolve, 4000));
   }

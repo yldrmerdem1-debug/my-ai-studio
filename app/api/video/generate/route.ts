@@ -8,10 +8,15 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import { getGeminiModelId } from '@/lib/gemini';
-import { generateSpeech, generateSFX } from '@/lib/audio-service';
-import { VOICE_CAST } from '@/lib/voice-constants';
-import { mergeVideoWithAudioUrl, mixVideoWithDucking } from '@/lib/videoProcessor';
-
+import { generateAtmosphere, generateSpeech } from '@/lib/audio-service';
+import { CINEMATIC_VISUAL_SUFFIX } from '@/lib/constants';
+import { buildFluxActionPrompt, isActionLikePrompt } from '@/lib/flux-action-prompts';
+import { SFX_QUALITY_SUFFIX, VOICE_CAST } from '@/lib/voice-constants';
+import { mixVideoWithDucking } from '@/lib/videoProcessor';
+import { runVeoImageToVideo } from '@/lib/veo-client';
+import { readPersonas, type PersonaRecord } from '@/lib/persona-registry';
+import { ensurePromptHasTriggers, uniqStrings, withDownloadTrue } from '@/lib/lora-utils';
+import { generateXaiVideo } from '@/lib/xai-video';
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
   fetch: (url, options) => fetch(url, { ...(options as RequestInit), timeout: 300000 } as any),
@@ -51,6 +56,85 @@ const saveStreamToPublic = async (stream: ReadableStream, extension: string): Pr
   return `/generated/${fileName}`;
 };
 
+const toBase64 = (buffer: ArrayBuffer) => Buffer.from(buffer).toString('base64');
+
+const getImageInlineData = async (url: string) => {
+  const absolute = ensureAbsoluteUrl(url);
+  const isReplicateFile = absolute.includes('api.replicate.com/v1/files/');
+  const resolved = isReplicateFile
+    ? await resolveReplicateFileUrl(absolute, process.env.REPLICATE_API_TOKEN || '')
+    : absolute;
+  const response = await fetch(resolved);
+  if (!response.ok) {
+    if (isReplicateFile) {
+      const token = process.env.REPLICATE_API_TOKEN || '';
+      if (!token) {
+        throw new Error(`Failed to fetch image for analysis: ${response.status}`);
+      }
+      const fileResponse = await fetch(absolute, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!fileResponse.ok) {
+        throw new Error(`Failed to fetch image for analysis: ${response.status}`);
+      }
+      const arrayBuffer = await fileResponse.arrayBuffer();
+      const mimeType = fileResponse.headers.get('content-type') || 'image/jpeg';
+      return { data: toBase64(arrayBuffer), mimeType };
+    }
+    throw new Error(`Failed to fetch image for analysis: ${response.status}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  const mimeType = response.headers.get('content-type') || 'image/jpeg';
+  return {
+    data: toBase64(arrayBuffer),
+    mimeType,
+  };
+};
+
+const analyzeImageWithGemini = async (imageUrl: string, plan: {
+  voice_category?: string;
+  speech_text?: string;
+  sfx_prompt?: string;
+  audio_environment?: string;
+  is_action_scene?: boolean;
+  voice_settings?: Record<string, unknown>;
+}) => {
+  if (!process.env.GEMINI_API_KEY) return null;
+  const preferredModel = 'gemini-2.5-flash';
+  const resolvedModel = await getGeminiModelId(process.env.GEMINI_API_KEY, preferredModel);
+  const model = genAI.getGenerativeModel({ model: resolvedModel, generationConfig: { temperature: 0.4 } });
+  let inlineData: { data: string; mimeType: string } | null = null;
+  try {
+    inlineData = await getImageInlineData(imageUrl);
+  } catch (error) {
+    console.warn('⚠️ Image analysis fetch failed, skipping vision refinement.', error);
+    return null;
+  }
+  const analysisPrompt = `
+You are an elite casting director and sound designer. Analyze the IMAGE and refine the audio plan.
+Pick the best voice category and audio environment based on the visual cues in the image.
+Return ONLY JSON:
+{
+  "gender": "male | female | unknown",
+  "voice_category": "male_villain | male_heroic | male_soft_calm | male_aggressive | female_seductive | female_news_anchor | female_scared",
+  "voice_settings": {"stability": 0.1-0.9, "similarity_boost": 0.75, "style": 0.0-1.0, "use_speaker_boost": true},
+  "audio_environment": "studio | cave | large_hall | bathroom | forest_outdoor",
+  "sfx_prompt": "Refined SFX prompt including Foley if action",
+  "speech_text": "Only adjust if needed to match facial expression",
+  "is_action_scene": true | false
+}
+If you are unsure, keep values close to the provided plan.
+Current plan:
+${JSON.stringify(plan)}
+`;
+  const result = await model.generateContent([
+    { text: analysisPrompt },
+    { inlineData },
+  ]);
+  const raw = result.response.text().trim();
+  return extractSceneJson(raw);
+};
+
 const extractImageUrl = (output: any): string => {
   if (!output) return '';
   if (typeof output === 'string') return output.includes('://') ? output : '';
@@ -79,6 +163,88 @@ const extractSceneJson = (raw: string) => {
     return match ? JSON.parse(match[0]) : null;
   }
 };
+
+const resolveIntentMode = (raw: unknown, isActionScene: boolean) => {
+  const normalized = typeof raw === 'string' ? raw.trim().toUpperCase() : '';
+  if (normalized === 'ACTION_MODE' || normalized === 'TALKING_MODE') {
+    return normalized;
+  }
+  return isActionScene ? 'ACTION_MODE' : 'TALKING_MODE';
+};
+
+const HARD_VIOLENCE_PATTERNS: RegExp[] = [
+  /\b(gore|gory|dismember|decapitat|behead|execution|massacre|torture)\b/i,
+  /\b(kill|killing|murder|stab|stabbing|strangle|shoot|headshot)\b/i,
+  /\b(blood|bloody|bleeding|gut|organs?)\b/i,
+];
+
+const SOFT_ACTION_PATTERNS: RegExp[] = [
+  /\b(action|cinematic|stunt|choreograph|fight|battle|impact|explosion|motion blur|kinetic)\b/i,
+  /\b(superhero|cape|tracking shot|low-angle|dramatic lighting)\b/i,
+];
+
+const containsHardViolence = (text: string) => {
+  if (!text) return false;
+  return HARD_VIOLENCE_PATTERNS.some(pattern => pattern.test(text));
+};
+
+const containsSoftAction = (text: string) => {
+  if (!text) return false;
+  return SOFT_ACTION_PATTERNS.some(pattern => pattern.test(text));
+};
+
+const isSensitiveFlag = (error: any) => {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('flagged as sensitive') || message.includes('e005') || message.includes('sensitive');
+};
+
+const isRateLimit = (error: any) => {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('429') || message.includes('resource_exhausted') || message.includes('rate limit');
+};
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const softenVeoPrompt = (prompt: string, level: 1 | 2 | 3) => {
+  let softened = prompt;
+  const safetyTail = ' no blood, no injury, no harm, no violence, no weapons, no killing, family-friendly action.';
+  const swaps: Array<[RegExp, string]> = [
+    [/\bstrike\b/gi, 'forceful move'],
+    [/\bpowerful\b/gi, 'dramatic'],
+    [/\bimpact\b/gi, 'shockwave'],
+    [/\bhit\b/gi, 'push'],
+    [/\bpunch\b/gi, 'gesture'],
+    [/\bknock(ed)?\b/gi, 'send'],
+    [/\bflying backwards\b/gi, 'sliding backward'],
+    [/\bexecuting\b/gi, 'performing'],
+    [/\btough\b/gi, 'determined'],
+  ];
+
+  if (level >= 1) {
+    for (const [re, rep] of swaps) softened = softened.replace(re, rep);
+    if (!softened.toLowerCase().includes('no blood')) softened += ` ${safetyTail}`;
+  }
+
+  if (level >= 2) {
+    softened = softened.replace(
+      /\b(superhero)\s+(sliding backward|flying backwards)\s+from\s+the\s+(impact|shockwave)\b/gi,
+      '$1 is pushed back by a visible shockwave (no contact, no injury)'
+    );
+    softened = softened.replace(/\b(stunt choreography)\b/gi, 'stage choreography (no contact)');
+    softened += ' show no physical contact; depict a near-miss or shockwave-only moment.';
+  }
+
+  if (level >= 3) {
+    softened =
+      'dynamic low-angle cinematic shot, determined elderly man with a mustache makes a dramatic gesture, ' +
+      'caped superhero slides backward as if pushed by wind or shockwave (no contact, no harm), ' +
+      'motion blur, kinetic camera movement, dramatic lighting, high contrast, smooth tracking shot, realistic movement, ' +
+      'family-friendly action, no violence, no injury, no blood.';
+  }
+
+  return softened.trim();
+};
+
 
 const resolveReplicateFileUrl = async (apiUrl: string, token: string): Promise<string> => {
   if (!apiUrl.includes('api.replicate.com/v1/files/')) return apiUrl;
@@ -198,6 +364,8 @@ export async function POST(req: Request) {
       personaModelId,
       personaTriggerWord,
       voiceId,
+      personaIds,
+      personas,
     } = body || {};
 
     const inputPrompt = (userPrompt || prompt || '').toString().trim();
@@ -205,9 +373,44 @@ export async function POST(req: Request) {
       throw new Error('Prompt is required.');
     }
 
+    const sanitizePrompt = (text: string) => (
+      text
+        .replace(/\bblood\b/gi, 'red cinematic lighting, crimson fluid, dark liquid')
+        .replace(/\bbrutal kill\b/gi, 'high stakes combat, neutralizing threat, intense action choreography')
+        .replace(/\bbone cracking\b/gi, 'heavy impact sound, deep thud, physical collision')
+        .replace(/\bkill\b/gi, 'neutralize opponent, final strike, dramatic ending')
+        .replace(/\bbreak bones\b/gi, 'heavy impact, brutal physics, martial arts choreography')
+    );
+    const softenPrompt = (text: string) => (
+      text
+        .replace(/\bfight scene\b/gi, 'intense action sequence')
+        .replace(/\bviolence\b/gi, 'high stakes action')
+        .replace(/\bgore\b/gi, 'dramatic tension')
+    );
+    const safeUserIdea = inputPrompt.trim();
+    const hasHardViolence = containsHardViolence(inputPrompt);
+    const hasSoftAction = containsSoftAction(inputPrompt);
+
     const triggerWord = personaTriggerWord || 'TOK';
 
-    const preferredModel = 'gemini-3-pro-preview';
+    // --- Collect selected personas for HF LoRA routing (supports multi-persona) ---
+    const requestedPersonaIds: string[] = Array.isArray(personaIds)
+      ? personaIds.map((v: any) => String(v)).filter(Boolean)
+      : [];
+    const providedPersonas: PersonaRecord[] = Array.isArray(personas)
+      ? (personas as any[]).filter(Boolean)
+      : [];
+    let loadedPersonas: PersonaRecord[] = [];
+    if (requestedPersonaIds.length > 0) {
+      const all = await readPersonas();
+      loadedPersonas = all.filter((p) => requestedPersonaIds.includes(p.personaId));
+    }
+    const personaPool = [...providedPersonas, ...loadedPersonas];
+    const hfUrls = uniqStrings(personaPool.map((p) => (p as any)?.huggingFaceUrl || (p as any)?.huggingface_url))
+      .map(withDownloadTrue);
+    const triggerWords = uniqStrings([triggerWord, ...personaPool.map((p) => p?.triggerWord || '')]);
+
+    const preferredModel = 'gemini-2.5-flash';
     const geminiApiKey = process.env.GEMINI_API_KEY || '';
     if (!geminiApiKey.trim()) {
       throw new Error('GEMINI_API_KEY not configured.');
@@ -218,50 +421,224 @@ export async function POST(req: Request) {
       generationConfig: { temperature: 0.7 },
     });
 
-    const directorPrompt = `
-SEN DÜNYANIN EN İYİ SİNEMATİK YAPAY ZEKA YÖNETMENİSİN.
-Amacın: Görsel, Ses, Hareket ve Atmosferin %100 uyumlu olduğu bir video tasarlamak.
+    /** Generate reference image. If fluxImagePrompt provided (from Gemini prompt-enhance), use it for keyframe continuity; otherwise use rawPrompt + action logic. */
+    const generateInitialImage = async (rawPrompt: string, options?: { fluxImagePrompt?: string }): Promise<string> => {
+      const ref = body?.sourceImage || body?.reference_image_url || body?.referenceImage;
+      if (ref && typeof ref === 'string') {
+        console.log('✅ [FLUX FIRST] Using provided reference image:', ref);
+        return await normalizeReplicateAssetUrl(ref);
+      }
+      const fluxImagePrompt = options?.fluxImagePrompt?.trim();
+      const useContextPrompt = Boolean(fluxImagePrompt);
+      const promptForImage = useContextPrompt
+        ? (personaModelId && !fluxImagePrompt!.toLowerCase().includes(triggerWord.toLowerCase())
+            ? `${triggerWord} ${fluxImagePrompt}`
+            : fluxImagePrompt!)
+        : `${triggerWord} ${rawPrompt.trim()}`.trim();
 
-GÖREVLERİN:
-1. CASTING: Karakterin görsel tanımına göre en uygun ses profilini seç.
-2. HAREKET YÖNETİMİ: Baş, göz ve mimik hareketleri doğal olmalı.
-3. ATMOSFER TASARIMI: Sahne duygusuna uygun arka plan müzik/SFX belirle.
+      // If we have HF LoRA(s) selected, generate the keyframe using a LoRA-capable Flux endpoint.
+      if (hfUrls.length > 0) {
+        const model =
+          hfUrls.length > 1
+            ? (process.env.REPLICATE_FLUX_MULTI_LORA_MODEL || 'lucataco/flux-dev-multi-lora')
+            : (process.env.REPLICATE_FLUX_LORA_MODEL || 'black-forest-labs/flux-dev-lora');
+        const fluxBasePrompt = useContextPrompt ? promptForImage : rawPrompt.trim();
+        const fluxInputPrompt = useContextPrompt
+          ? fluxBasePrompt
+          : (isActionLikePrompt(fluxBasePrompt) ? buildFluxActionPrompt(fluxBasePrompt, { triggerWord }) : fluxBasePrompt);
+        const loraPrompt = ensurePromptHasTriggers(fluxInputPrompt, triggerWords);
 
-BANA ŞU JSON FORMATINDA CEVAP VER:
+        let imageOutput: any = null;
+        try {
+          if (hfUrls.length > 1) {
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, hf_loras: hfUrls, aspect_ratio: '16:9', output_format: 'png', output_quality: 100, num_inference_steps: 50 } });
+          } else {
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 1.0, aspect_ratio: '16:9', output_format: 'png', output_quality: 100, num_inference_steps: 50 } });
+          }
+        } catch (error: any) {
+          // Fallback to minimal inputs if the model rejects extra fields
+          if (hfUrls.length > 1) {
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, hf_loras: hfUrls } });
+          } else {
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 1.0 } });
+          }
+        }
+
+        let url = extractImageUrl(imageOutput);
+        if (!url) {
+          const stream = findFirstStream(imageOutput);
+          if (stream) url = await saveStreamToPublic(stream, 'png');
+        }
+        if (!url) throw new Error('HF LoRA keyframe generation failed.');
+        return await normalizeReplicateAssetUrl(url);
+      }
+
+      if (personaModelId) {
+        console.log('📸 [FLUX FIRST] Generating persona reference image' + (useContextPrompt ? ' (context-aware keyframe)' : '') + '...');
+        let targetVersion = personaModelId;
+        if (!personaModelId.includes('/') && !personaModelId.includes(':')) {
+          try {
+            const training = await replicate.trainings.get(personaModelId);
+            targetVersion = training.output?.version || training.version || personaModelId;
+          } catch {
+            targetVersion = personaModelId;
+          }
+        }
+        const isAction = useContextPrompt ? false : isActionLikePrompt(rawPrompt);
+        const personaPrompt = useContextPrompt
+          ? promptForImage
+          : isAction
+            ? buildFluxActionPrompt(`${triggerWord}, ${rawPrompt}`.trim(), { triggerWord })
+            : `${triggerWord}, wide angle, full body or face, cinematic, ${rawPrompt}`.trim();
+        let imageOutput: any = null;
+        try {
+          imageOutput = await replicate.run(targetVersion, {
+            input: {
+              prompt: personaPrompt,
+              output_format: 'png',
+              disable_safety_checker: true,
+            },
+          });
+        } catch (error: any) {
+          if (String(error?.message || '').includes('E005')) {
+            imageOutput = await replicate.run(targetVersion, {
+              input: {
+                prompt: softenPrompt(personaPrompt),
+                output_format: 'png',
+                disable_safety_checker: true,
+              },
+            });
+          } else {
+            throw error;
+          }
+        }
+        let url = extractImageUrl(imageOutput);
+        if (!url) {
+          const stream = findFirstStream(imageOutput);
+          if (stream) url = await saveStreamToPublic(stream, 'png');
+        }
+        if (!url) throw new Error('Persona reference image generation failed.');
+        return await normalizeReplicateAssetUrl(url);
+      }
+      console.log('📸 [FLUX FIRST] Generating Flux 2 Max reference image' + (useContextPrompt ? ' (context-aware keyframe)' : '') + '...');
+      const fluxBasePrompt = useContextPrompt ? promptForImage : rawPrompt.trim();
+      const fluxInputPrompt = useContextPrompt
+        ? fluxBasePrompt
+        : (isActionLikePrompt(fluxBasePrompt) ? buildFluxActionPrompt(fluxBasePrompt, { triggerWord }) : fluxBasePrompt);
+      let imageOutput: any = null;
+      try {
+        imageOutput = await replicate.run('black-forest-labs/flux-2-max', {
+          input: {
+            prompt: fluxInputPrompt,
+            aspect_ratio: '16:9',
+            output_quality: 100,
+            output_format: 'png',
+            num_inference_steps: 50,
+          },
+        });
+      } catch (error: any) {
+        if (String(error?.message || '').includes('E005')) {
+          imageOutput = await replicate.run('black-forest-labs/flux-2-max', {
+            input: {
+              prompt: softenPrompt(fluxInputPrompt),
+              aspect_ratio: '16:9',
+              output_quality: 100,
+              output_format: 'png',
+              num_inference_steps: 50,
+            },
+          });
+        } else {
+          throw error;
+        }
+      }
+      let url = extractImageUrl(imageOutput);
+      if (!url) {
+        const stream = findFirstStream(imageOutput);
+        if (stream) url = await saveStreamToPublic(stream, 'png');
+      }
+      if (!url) throw new Error('Flux reference image generation failed.');
+      return await normalizeReplicateAssetUrl(url);
+    };
+
+    // ——— CONTEXT-AWARE: Gemini first → flux_image_prompt (keyframe) + video_motion_prompt (motion after image). Perfect continuity. ———
+    const promptEnhanceSchema = `
+You are a context-aware visual prompt engineer for image-to-video. Output ONLY valid JSON. English for both prompts.
+
+——— flux_image_prompt (for the INITIAL image / Flux keyframe) ———
+- Do NOT generate a generic portrait if the user asks for action. Visualize as a "Keyframe" or "Movie Still".
+- If the user asks for fight/action, describe MID-ACTION (e.g. "fist connecting", "mid-air kick", "gripping steering wheel"). Include environment, lighting, camera angle.
+- For Personas: Inject the persona token (${triggerWord}) into this dynamic scene. Do NOT revert to a static pose when action is requested.
+- Example — User: "Hıdır Baba araba sürüyor." → "Side angle shot of ${triggerWord} gripping the steering wheel of a fast car, motion blur on the road, intense focus, sunset lighting, cinematic 8k."
+- Structure: [Camera angle] of [persona] [mid-action or keyframe], [environment], [lighting], photorealistic, 8k, cinematic.
+
+——— video_motion_prompt (ONLY movement/physics AFTER the image) ———
+- Describe ONLY what happens after the keyframe. Video starts from the exact Flux frame. No static scene repeat.
+- Example: "The car accelerates forward, dust kicking up, camera tracks the movement."
+- Motion, camera movement, physics. Same character. 6–8 seconds. No text, no watermark. English.
+
+——— Director fields ———
+- mode: ACTION_MODE if action/fight/drive/combat; TALKING_MODE if dialogue/speech.
+- is_fight_action: true if blood/gore/knife/stab/fight/weapon/combat.
+- voice_category, speech_text, sfx_prompt, audio_environment, is_action_scene, voice_settings.
+
+JSON:
 {
-  "character_profile": {
-    "visual_description": "Flux-2-max için aşırı detaylı, 4K prompt. Yüz hatlarını, cilt dokusunu ve ışığı belirt.",
-    "age_group": "young | middle_aged | old",
-    "gender": "male | female",
-    "nationality": "american | british | turkish",
-    "suggested_voice_category": "young_male_american"
-  },
-  "movement_direction": {
-    "kling_prompt": "Kling için hareket emri. Örn: 'Slowly turns head from left to right, blinks naturally, slightly tilts head while speaking, looks directly at camera at the end.'",
-    "expression": "happy | serious | suspicious | flirting"
-  },
-  "audio_engineering": {
-    "speech_text": "Karakterin söyleyeceği metin.",
-    "speech_emotion_prompt": "ElevenLabs için duygu tarifi (Örn: 'Deep, raspy voice, slightly angry tone').",
-    "background_music_prompt": "ElevenLabs/AudioLDM için müzik/SFX tarifi."
-  }
+  "flux_image_prompt": "Full keyframe prompt. Persona in mid-action if action requested. English.",
+  "video_motion_prompt": "Only movement and physics after the image. English.",
+  "mode": "ACTION_MODE | TALKING_MODE",
+  "is_fight_action": true | false,
+  "visual_prompt": "Same as flux_image_prompt for fallback",
+  "voice_category": "male_villain",
+  "speech_text": "",
+  "sfx_prompt": "",
+  "audio_environment": "studio",
+  "is_action_scene": true | false,
+  "voice_settings": { "stability": 0.35, "similarity_boost": 0.75, "style": 0.5, "use_speaker_boost": true }
 }
-Output MUST be valid JSON only. Use English in prompts.
-User idea: "${inputPrompt}"
-    `.trim();
 
-    const directorCut = await model.generateContent(directorPrompt);
-    const raw = directorCut.response.text().trim();
-    const scene = extractSceneJson(raw);
+User idea: "${safeUserIdea}"
+Persona token: ${triggerWord}
+`;
+
+    let scene: Record<string, unknown> | null = null;
+    try {
+      const directorCut = await model.generateContent(promptEnhanceSchema);
+      const raw = directorCut.response.text().trim();
+      scene = extractSceneJson(raw);
+    } catch (err) {
+      console.warn('Gemini prompt-enhance failed, using raw prompt for image.', err);
+    }
+
+    const fluxImagePromptFromGemini = scene && typeof scene.flux_image_prompt === 'string' ? scene.flux_image_prompt.trim() : '';
+    const videoMotionPromptFromGemini = scene && typeof scene.video_motion_prompt === 'string' ? scene.video_motion_prompt.trim() : '';
+
+    const referenceImageUrl = await generateInitialImage(safeUserIdea, fluxImagePromptFromGemini ? { fluxImagePrompt: fluxImagePromptFromGemini } : undefined);
+    console.log('🖼️ [FLUX FIRST] Reference image URL (context-aware keyframe) for Veo/Grok/Kling:', referenceImageUrl);
+
     if (!scene) {
       throw new Error('Gemini returned invalid JSON.');
     }
 
-    const characterProfile = scene.character_profile || {};
-    const movementDirection = scene.movement_direction || {};
-    const audioEngineering = scene.audio_engineering || {};
-    const fluxPrompt = typeof characterProfile.visual_description === 'string' ? characterProfile.visual_description.trim() : '';
-    const klingPrompt = typeof movementDirection.kling_prompt === 'string' ? movementDirection.kling_prompt.trim() : '';
+    const hasVoiceId = Boolean(typeof voiceId === 'string' && voiceId.trim());
+    const isFightAction = Boolean((scene as any).is_fight_action);
+    const provider = hasVoiceId
+      ? ('KLING_ELEVEN' as const)
+      : isFightAction
+        ? ('GROK' as const)
+        : ('VEO' as const);
+    console.log('🎬 Routing (Gemini):', hasVoiceId ? 'voice_id → KLING_ELEVEN' : isFightAction ? 'fight/action → GROK' : 'default → VEO', '→', provider);
+
+    const rawFluxPrompt = typeof scene.visual_prompt === 'string' ? scene.visual_prompt.trim() : (typeof scene.flux_image_prompt === 'string' ? scene.flux_image_prompt.trim() : '');
+    const fluxPrompt = rawFluxPrompt.toLowerCase().includes('arri alexa')
+      ? rawFluxPrompt
+      : `${rawFluxPrompt}${CINEMATIC_VISUAL_SUFFIX}`;
+    const videoMotionPrompt = videoMotionPromptFromGemini || rawFluxPrompt;
+    const sceneAny = scene as Record<string, unknown> & { kling_prompt?: string; movement_direction?: { kling_prompt?: string } };
+    const klingPrompt = typeof sceneAny.kling_prompt === 'string'
+      ? sceneAny.kling_prompt.trim()
+      : typeof sceneAny.movement_direction?.kling_prompt === 'string'
+        ? sceneAny.movement_direction.kling_prompt.trim()
+        : '';
     const rawUserDialogue = typeof body?.dialogue === 'string'
       ? body.dialogue.trim()
       : typeof body?.dialogueText === 'string'
@@ -271,19 +648,44 @@ User idea: "${inputPrompt}"
           : typeof body?.script === 'string'
             ? body.script.trim()
             : '';
-    const speechText = typeof audioEngineering.speech_text === 'string' ? audioEngineering.speech_text.trim() : '';
-    const speechEmotionPrompt = typeof audioEngineering.speech_emotion_prompt === 'string'
-      ? audioEngineering.speech_emotion_prompt.trim()
+    const hasUserScript = Boolean(rawUserDialogue && rawUserDialogue.trim());
+    const speechText = typeof scene.speech_text === 'string' ? scene.speech_text.trim() : '';
+    const sfxPrompt = typeof scene.sfx_prompt === 'string' ? scene.sfx_prompt.trim() : '';
+    const suggestedVoiceCategory = typeof scene.voice_category === 'string'
+      ? scene.voice_category.trim()
       : '';
-    const sfxPrompt = typeof audioEngineering.background_music_prompt === 'string'
-      ? audioEngineering.background_music_prompt.trim()
+    const audioEnvironment = typeof scene.audio_environment === 'string'
+      ? scene.audio_environment.trim()
       : '';
-    const suggestedVoiceCategory = typeof characterProfile.suggested_voice_category === 'string'
-      ? characterProfile.suggested_voice_category.trim()
-      : '';
-    const isDialogue = Boolean(rawUserDialogue) && Boolean(speechText);
+    const femaleCueRegex = /\b(woman|female|girl|lady|she|her)\b/i;
+    const maleCueRegex = /\b(man|male|boy|he|him)\b/i;
+    const hasFemaleCue = femaleCueRegex.test(inputPrompt);
+    const hasMaleCue = maleCueRegex.test(inputPrompt);
+    const resolvedVoiceCategory = personaModelId && !hasFemaleCue && !hasMaleCue
+      ? (suggestedVoiceCategory?.startsWith('female_') ? 'male_heroic' : suggestedVoiceCategory)
+      : suggestedVoiceCategory;
+    const isActionScene = Boolean((scene as any).is_action_scene);
+    const baseMode = resolveIntentMode((scene as any).mode, isActionScene);
+    const intentMode = provider === 'KLING_ELEVEN' ? 'TALKING_MODE' : 'ACTION_MODE';
+    const vs = scene.voice_settings as { stability?: number; similarity_boost?: number; style?: number; use_speaker_boost?: boolean } | undefined;
+    const voiceSettings = typeof vs === 'object' && vs
+      ? {
+        stability: Number(vs.stability),
+        similarity_boost: Number(vs.similarity_boost),
+        style: Number(vs.style),
+        use_speaker_boost: Boolean(vs.use_speaker_boost),
+      }
+      : undefined;
+    const dialogueText = rawUserDialogue || speechText;
+    const isDialogue = intentMode === 'TALKING_MODE';
+    if (isDialogue && !dialogueText) {
+      throw new Error('TALKING_MODE requires a text script or Gemini speech_text.');
+    }
+    if (isDialogue && !hasVoiceId) {
+      throw new Error('TALKING_MODE requires a voice_id.');
+    }
 
-    if (!sfxPrompt || !fluxPrompt || !klingPrompt) {
+    if (!sfxPrompt || !fluxPrompt) {
       throw new Error('Director output missing required prompts.');
     }
 
@@ -297,63 +699,291 @@ User idea: "${inputPrompt}"
         const personaPrompt = fluxPrompt.toLowerCase().includes(triggerWord.toLowerCase())
           ? fluxPrompt
           : `${triggerWord} ${fluxPrompt}`.trim();
-        const imageOutput = await replicate.run(targetVersion, {
-          input: {
-            prompt: personaPrompt,
-            output_format: 'jpg',
-            disable_safety_checker: true,
-          },
-        });
+        let imageOutput: any = null;
+        try {
+          imageOutput = await replicate.run(targetVersion, {
+            input: {
+              prompt: personaPrompt,
+              output_format: 'png',
+              disable_safety_checker: true,
+            },
+          });
+        } catch (error: any) {
+          const message = String(error?.message || '');
+          if (message.includes('E005')) {
+            const softened = softenPrompt(personaPrompt);
+            imageOutput = await replicate.run(targetVersion, {
+              input: {
+                prompt: softened,
+                output_format: 'png',
+                disable_safety_checker: true,
+              },
+            });
+          } else {
+            throw error;
+          }
+        }
         let imageUrl = extractImageUrl(imageOutput);
         if (!imageUrl) {
           const stream = findFirstStream(imageOutput);
-          if (stream) imageUrl = await saveStreamToPublic(stream, 'jpg');
+          if (stream) imageUrl = await saveStreamToPublic(stream, 'png');
         }
         if (!imageUrl) throw new Error('Persona image generation failed.');
         return await normalizeReplicateAssetUrl(imageUrl);
       }
 
-      const imageOutput = await replicate.run('black-forest-labs/flux-2-max', {
-        input: {
-          prompt: fluxPrompt,
-          aspect_ratio: '16:9',
-          output_quality: 100,
-          output_format: 'jpg',
-          num_inference_steps: 50,
-        },
-      });
+      let imageOutput: any = null;
+      try {
+        imageOutput = await replicate.run('black-forest-labs/flux-2-max', {
+          input: {
+            prompt: fluxPrompt,
+            aspect_ratio: '16:9',
+            output_quality: 100,
+            output_format: 'png',
+            num_inference_steps: 50,
+          },
+        });
+      } catch (error: any) {
+        const message = String(error?.message || '');
+        if (message.includes('E005')) {
+          const softened = softenPrompt(fluxPrompt);
+          imageOutput = await replicate.run('black-forest-labs/flux-2-max', {
+            input: {
+              prompt: softened,
+              aspect_ratio: '16:9',
+              output_quality: 100,
+              output_format: 'png',
+              num_inference_steps: 50,
+            },
+          });
+        } else {
+          throw error;
+        }
+      }
       let imageUrl = extractImageUrl(imageOutput);
       if (!imageUrl) {
         const stream = findFirstStream(imageOutput);
-        if (stream) imageUrl = await saveStreamToPublic(stream, 'jpg');
+        if (stream) imageUrl = await saveStreamToPublic(stream, 'png');
       }
       if (!imageUrl) throw new Error('Flux image generation failed.');
       return await normalizeReplicateAssetUrl(imageUrl);
     };
 
-    const generateAtmosphere = async (promptText: string) => {
-      return await generateSFX({
-        text: promptText,
-        durationSeconds: 10,
-        promptInfluence: 0.5,
-      });
-    };
+    const imageUrl = referenceImageUrl;
+    if (!imageUrl || typeof imageUrl !== 'string' || !String(imageUrl).trim()) {
+      throw new Error('Referans görsel gerekli: Persona/Flux görseli video motoruna (Veo/Grok/Kling) verilmeden önce üretilmeli.');
+    }
+    const visionPlan = await analyzeImageWithGemini(imageUrl, {
+      voice_category: resolvedVoiceCategory,
+      speech_text: dialogueText,
+      sfx_prompt: sfxPrompt,
+      audio_environment: audioEnvironment,
+      is_action_scene: isActionScene,
+      voice_settings: voiceSettings,
+    });
+    const refinedVoiceCategory = visionPlan?.voice_category || resolvedVoiceCategory;
+    const refinedSpeechText = isDialogue ? (visionPlan?.speech_text || dialogueText) : dialogueText;
+    const refinedSfxPrompt = visionPlan?.sfx_prompt || sfxPrompt;
+    const refinedAudioEnvironment = visionPlan?.audio_environment || audioEnvironment;
+    const refinedVoiceSettings = visionPlan?.voice_settings || voiceSettings;
+    const refinedActionScene = typeof visionPlan?.is_action_scene === 'boolean'
+      ? visionPlan.is_action_scene
+      : isActionScene;
+    const sfxPromptWithAction = refinedActionScene
+      ? `${refinedSfxPrompt}, impact, hit, crash, explosion`
+      : refinedSfxPrompt;
 
-    const generateSpeechAudio = async () => {
-      if (!speechText) return '';
-      const fallbackVoiceId = '21m00Tcm4TlvDq8ikWAM';
-      const selectedVoiceId = VOICE_CAST[suggestedVoiceCategory] || voiceId || fallbackVoiceId;
-      return await generateSpeech({
-        text: speechText,
-        voiceId: selectedVoiceId,
-        emotion_prompt: speechEmotionPrompt,
-      });
-    };
+    switch (provider) {
+      case 'VEO': {
+        if (!imageUrl || typeof imageUrl !== 'string') {
+          throw new Error('VEO I2V requires Persona/Flux reference image. Generate image first.');
+        }
+        let veoImageUrl = ensureAbsoluteUrl(imageUrl);
+        const isVeoLocal = veoImageUrl.includes('localhost') || veoImageUrl.includes('127.0.0.1') || veoImageUrl.includes('0.0.0.0') || veoImageUrl.startsWith('/');
+        if (isVeoLocal) {
+          veoImageUrl = await ensureReplicateUri(veoImageUrl, 'veo-ref.jpg', 'image/jpeg');
+        } else if (veoImageUrl.includes('api.replicate.com/v1/files/')) {
+          veoImageUrl = await resolveReplicateFileUrl(veoImageUrl, process.env.REPLICATE_API_TOKEN || '');
+        }
+        const actionPromptBase = videoMotionPrompt;
+        const actionAudioPrompt = [
+          refinedAudioEnvironment ? `Ambient sound: ${refinedAudioEnvironment}.` : '',
+          refinedSfxPrompt ? `Sound effects: ${refinedSfxPrompt}.` : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        const actionPrompt = actionAudioPrompt
+          ? `${actionPromptBase} ${actionAudioPrompt}`.trim()
+          : actionPromptBase;
+        const veoModel = process.env.REPLICATE_VEO_MODEL || 'google/veo-3.1';
+        const veoFallbackModel = (process.env.REPLICATE_VEO_FALLBACK_MODEL || '').trim() || null;
+        const baseVeoPrompt = actionPrompt;
+        let veoOutput: any = null;
+        let lastError: any = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            veoOutput = await runVeoImageToVideo({
+              image_url: veoImageUrl,
+              prompt: baseVeoPrompt,
+              model: veoModel,
+            });
+            lastError = null;
+            break;
+          } catch (error: any) {
+            lastError = error;
+            if (isRateLimit(error)) {
+              await sleep(1200);
+              continue;
+            }
+            if (isSensitiveFlag(error)) {
+              continue;
+            }
+            break;
+          }
+        }
 
-    const [voiceUrl, sfxUrl, imageUrl] = await Promise.all([
-      isDialogue ? generateSpeechAudio() : Promise.resolve(''),
-      generateAtmosphere(sfxPrompt),
-      generateImage(),
+        if (!veoOutput && veoFallbackModel) {
+          try {
+            veoOutput = await runVeoImageToVideo({
+              image_url: veoImageUrl,
+              prompt: baseVeoPrompt,
+              model: veoFallbackModel,
+            });
+            lastError = null;
+          } catch (error: any) {
+            lastError = error;
+          }
+        }
+
+        if (!veoOutput) {
+          throw lastError || new Error('Veo video generation failed.');
+        }
+
+        let videoUrl = extractImageUrl(veoOutput);
+        if (!videoUrl) {
+          const stream = findFirstStream(veoOutput);
+          if (stream) videoUrl = await saveStreamToPublic(stream, 'mp4');
+        }
+        if (!videoUrl) {
+          throw new Error('Veo video generation failed.');
+        }
+        videoUrl = await normalizeReplicateAssetUrl(videoUrl);
+        return NextResponse.json({
+          success: true,
+          videoUrl,
+          imageUrl,
+          scene,
+          engine: veoModel,
+        });
+      }
+
+      case 'GROK': {
+        const actionPromptBase = videoMotionPrompt;
+        const actionAudioPrompt = [
+          refinedAudioEnvironment ? `Ambient sound: ${refinedAudioEnvironment}.` : '',
+          refinedSfxPrompt ? `Sound effects: ${refinedSfxPrompt}.` : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        const actionPrompt = actionAudioPrompt
+          ? `${actionPromptBase} ${actionAudioPrompt}`.trim()
+          : actionPromptBase;
+        const grokPrompt = actionPrompt;
+        const imageAbsolute = ensureAbsoluteUrl(imageUrl);
+        let grokImageForInput: string | null = null;
+        // Prefer xAI Video API (console.x.ai) if configured; fallback to Replicate otherwise.
+        const xaiKey = String(process.env.XAI_API_KEY || process.env.XAI_KEY || process.env.XAI_TOKEN || '').trim();
+        const isGrokLocal = imageAbsolute.includes('localhost') || imageAbsolute.includes('127.0.0.1') || imageAbsolute.includes('0.0.0.0') || imageUrl.startsWith('/');
+        if (isGrokLocal) {
+          // If xAI is enabled, avoid uploading to Replicate; we'll send a data URI instead.
+          if (!xaiKey) {
+            try {
+              grokImageForInput = await ensureReplicateUri(imageAbsolute, 'grok-ref.jpg', 'image/jpeg');
+            } catch {
+              // fallback to data URI below
+            }
+          }
+        } else if (imageAbsolute.includes('api.replicate.com/v1/files/')) {
+          // Replicate file URLs are not public; for xAI we prefer data URI.
+          if (!xaiKey) {
+            try {
+              grokImageForInput = await resolveReplicateFileUrl(imageAbsolute, process.env.REPLICATE_API_TOKEN || '');
+            } catch {
+              // will try data URI below
+            }
+          }
+        } else if (imageAbsolute.startsWith('http')) {
+          grokImageForInput = imageAbsolute;
+        }
+        const getReferenceImageAsDataUri = async (): Promise<string | null> => {
+          try {
+            if (imageUrl.startsWith('/generated/')) {
+              const { readFile } = await import('node:fs/promises');
+              const buf = await readFile(path.join(process.cwd(), 'public', imageUrl));
+              return `data:image/jpeg;base64,${buf.toString('base64')}`;
+            }
+            const urlToFetch = imageAbsolute.includes('api.replicate.com/v1/files/')
+              ? await resolveReplicateFileUrl(imageAbsolute, process.env.REPLICATE_API_TOKEN || '')
+              : imageAbsolute.startsWith('http')
+                ? imageAbsolute
+                : null;
+            if (!urlToFetch) return null;
+            const res = urlToFetch.includes('api.replicate.com')
+              ? await fetch(urlToFetch, { headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` } })
+              : await fetch(urlToFetch);
+            if (!res.ok) return null;
+            const buf = await res.arrayBuffer();
+            const mime = res.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg';
+            return `data:${mime};base64,${toBase64(buf)}`;
+          } catch {
+            return null;
+          }
+        };
+        if (!grokImageForInput) {
+          const dataUri = await getReferenceImageAsDataUri();
+          if (dataUri) grokImageForInput = dataUri;
+        }
+        if (!grokImageForInput || !String(grokImageForInput).trim()) {
+          throw new Error('Grok icin referans gorsel gerekli; persona/Flux gorseli verilmedi.');
+        }
+        const durationSec = Math.min(15, Math.max(5, Number(body?.duration_seconds ?? body?.video_duration ?? body?.duration ?? 5)));
+        // xAI-only: if GROK is selected, require XAI_API_KEY and do not fall back to Replicate.
+        if (!xaiKey) {
+          throw new Error('XAI_API_KEY is missing. Grok engine requires xAI API key (no Replicate fallback).');
+        }
+        const xai = await generateXaiVideo({
+          prompt: grokPrompt,
+          imageUrl: grokImageForInput,
+          duration: durationSec,
+          aspectRatio: '16:9',
+          resolution: (process.env.XAI_VIDEO_RESOLUTION || '480p') as any,
+          model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
+          timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
+          pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
+        });
+        return NextResponse.json({
+          success: true,
+          videoUrl: xai.url,
+          imageUrl,
+          scene,
+          engine: `xai/${xai.model}`,
+        });
+
+      }
+
+      default:
+        break;
+    }
+
+    const [voiceUrl, sfxUrl] = await Promise.all([
+      isDialogue
+        ? generateSpeech(
+          `${refinedSpeechText}${refinedAudioEnvironment ? ` speaking in a ${refinedAudioEnvironment}, natural reverb.` : ''}`,
+          voiceId,
+          refinedVoiceSettings
+        )
+        : Promise.resolve(''),
+      generateAtmosphere(`${sfxPromptWithAction}${SFX_QUALITY_SUFFIX}`, 10),
     ]);
 
     const absoluteVoiceUrl = isDialogue ? ensureAbsoluteUrl(voiceUrl) : '';
@@ -377,70 +1007,49 @@ User idea: "${inputPrompt}"
       }
     }
 
-    let videoUrl = '';
-    if (isDialogue) {
-      const avatarModel = 'kwaivgi/kling-avatar-v2';
-      const avatarOutput = await replicate.run(avatarModel, {
-        input: {
-          image: klingImageUrl,
-          audio: klingAudioUrl,
-          prompt: klingPrompt,
-          match_mode: 'audio_driven',
-          audio_strength: 1.0,
-          animation_mode: 'high_fidelity',
-          cfg_scale: 0.6,
-          aspect_ratio: '16:9',
-          duration: 30,
-        },
-      });
-      videoUrl = extractImageUrl(avatarOutput);
-      if (!videoUrl) {
-        const stream = findFirstStream(avatarOutput);
-        if (stream) videoUrl = await saveStreamToPublic(stream, 'mp4');
-      }
-    } else {
-      const videoModel = 'kwaivgi/kling-v2.5-turbo-pro';
-      const videoOutput = await replicate.run(videoModel, {
-        input: {
-          prompt: klingPrompt,
-          input_image: klingImageUrl,
-          aspect_ratio: '16:9',
-          duration: 30,
-          cfg_scale: 0.6,
-        },
-      });
-      videoUrl = extractImageUrl(videoOutput);
-      if (!videoUrl) {
-        const stream = findFirstStream(videoOutput);
-        if (stream) videoUrl = await saveStreamToPublic(stream, 'mp4');
-      }
+    const avatarModel = 'kwaivgi/kling-avatar-v2';
+    const avatarOutput = await replicate.run(avatarModel, {
+      input: {
+        image: klingImageUrl,
+        audio: klingAudioUrl,
+        prompt: klingPrompt || 'subtle head movement, micro facial expressions',
+        match_mode: 'audio_driven',
+        audio_strength: 1.0,
+        animation_mode: 'high_fidelity',
+        cfg_scale: 0.6,
+        aspect_ratio: '16:9',
+        duration: 10,
+      },
+    });
+    let videoUrl = extractImageUrl(avatarOutput);
+    if (!videoUrl) {
+      const stream = findFirstStream(avatarOutput);
+      if (stream) videoUrl = await saveStreamToPublic(stream, 'mp4');
     }
-    if (!videoUrl) throw new Error('Kling video failed.');
+    if (!videoUrl) throw new Error('Kling avatar video failed.');
     videoUrl = await normalizeReplicateAssetUrl(videoUrl);
 
-    const finalMovie = isDialogue
-      ? await mixVideoWithDucking({
-        videoUrl,
-        voiceUrl,
-        sfxUrl,
-        voiceVolume: 1.0,
-        sfxBedVolume: 0.6,
-        duckedSfxVolume: 0.2,
-      })
-      : await mergeVideoWithAudioUrl({
-        videoUrl,
-        audioUrl: sfxUrl,
-        audioVolume: 0.6,
-      });
+    const finalMovie = await mixVideoWithDucking({
+      videoUrl,
+      voiceUrl,
+      sfxUrl,
+      voiceVolume: 1.0,
+      sfxBedVolume: refinedActionScene ? 0.6 : 0.2,
+      duckedSfxVolume: 0.2,
+      audioEnvironment: refinedAudioEnvironment,
+    });
 
     return NextResponse.json({
       success: true,
       videoUrl: finalMovie.videoUrl,
       imageUrl,
       scene,
+      engine: 'kling-avatar-v2',
     });
   } catch (error: any) {
     console.error('❌ HATA:', error.message || error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const msg = String(error?.message || 'Unknown error');
+    const isMissingXaiKey = msg.toLowerCase().includes('xai_api_key') && msg.toLowerCase().includes('missing');
+    return NextResponse.json({ error: msg }, { status: isMissingXaiKey ? 400 : 500 });
   }
 }

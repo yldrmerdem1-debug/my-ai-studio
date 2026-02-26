@@ -1,6 +1,6 @@
 import { MODEL_REGISTRY, type ModelAlias } from '@/lib/model-registry';
 
-export type VideoQuality = 'standard' | 'cinematic';
+export type VideoQuality = 'standard' | 'premium';
 
 const CREDIT_COST_BY_TIER = {
   low: 1,
@@ -16,9 +16,9 @@ export const VIDEO_QUALITY_CONFIG: Record<
     creditCost: CREDIT_COST_BY_TIER[MODEL_REGISTRY.STANDARD_VIDEO_MODEL.tier],
     label: 'Standard',
   },
-  cinematic: {
+  premium: {
     modelAlias: 'CINEMATIC_VIDEO_MODEL',
     creditCost: CREDIT_COST_BY_TIER[MODEL_REGISTRY.CINEMATIC_VIDEO_MODEL.tier],
-    label: 'Cinematic',
+    label: 'Premium',
   },
 };

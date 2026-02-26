@@ -39,7 +39,8 @@ export async function POST(request: NextRequest) {
 
     const uploadBufferToReplicate = async (buffer: Buffer, contentType: string, filename: string) => {
       const form = new FormData();
-      form.append('content', new Blob([buffer], { type: contentType }), filename);
+      const part: BlobPart = Buffer.isBuffer(buffer) ? new Uint8Array(buffer) : buffer;
+      form.append('content', new Blob([part], { type: contentType }), filename);
       const upload = await fetch('https://api.replicate.com/v1/files', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiToken.trim()}` },
