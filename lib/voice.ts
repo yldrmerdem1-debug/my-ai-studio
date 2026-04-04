@@ -1,9 +1,5 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import path from 'node:path';
 import crypto from 'node:crypto';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
+import { persistGeneratedBuffer } from '@/lib/generated-assets';
 
 type VoiceFormat = 'mp3' | 'wav';
 
@@ -95,19 +91,20 @@ export const generateVoiceBuffer = async ({
 
   const mimeType = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
   const extension = format === 'wav' ? 'wav' : 'mp3';
-  const dir = path.join(process.cwd(), 'public', 'tts');
-  await mkdir(dir, { recursive: true });
   const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await pipeline(Readable.fromWeb(audioBlob.stream() as any), createWriteStream(filePath));
+  const publicUrl = await persistGeneratedBuffer(buffer, {
+    prefix: 'generated/audio',
+    suggestedName: fileName,
+    contentType: mimeType,
+  });
 
   return {
     buffer,
     mimeType,
     extension,
     fileName,
-    filePath,
-    publicUrl: `/tts/${fileName}`,
+    filePath: publicUrl,
+    publicUrl,
   };
 };
 
@@ -149,19 +146,20 @@ export const generateSoundEffectBuffer = async ({
   const buffer = Buffer.from(await audioBlob.arrayBuffer());
   const mimeType = 'audio/mpeg';
   const extension: VoiceFormat = 'mp3';
-  const dir = path.join(process.cwd(), 'public', 'tts');
-  await mkdir(dir, { recursive: true });
   const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await pipeline(Readable.fromWeb(audioBlob.stream() as any), createWriteStream(filePath));
+  const publicUrl = await persistGeneratedBuffer(buffer, {
+    prefix: 'generated/audio',
+    suggestedName: fileName,
+    contentType: mimeType,
+  });
 
   return {
     buffer,
     mimeType,
     extension,
     fileName,
-    filePath,
-    publicUrl: `/tts/${fileName}`,
+    filePath: publicUrl,
+    publicUrl,
   };
 };
 

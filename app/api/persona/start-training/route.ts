@@ -1,5 +1,22 @@
 import { NextRequest } from 'next/server';
 import { findPersonaById, upsertPersona } from '@/lib/persona-registry';
+import { getStorageProvider } from '@/lib/storage';
+
+const resolveTrainingZipInputUrl = async (persona: Awaited<ReturnType<typeof findPersonaById>>) => {
+  const storagePath = String(persona?.trainingZipStoragePath || '').trim();
+  if (storagePath) {
+    const provider = getStorageProvider();
+    if (provider.getPublicUrl) {
+      try {
+        return await provider.getPublicUrl(storagePath);
+      } catch {
+        return provider.getSignedUrl(storagePath, 60 * 60 * 24);
+      }
+    }
+    return provider.getSignedUrl(storagePath, 60 * 60 * 24);
+  }
+  return String(persona?.trainingZipUrl || '').trim();
+};
 
 export async function POST(request: NextRequest) {
   try {
@@ -40,7 +57,23 @@ export async function POST(request: NextRequest) {
     const trainingEndpoint =
       'https://api.replicate.com/v1/models/replicate/fast-flux-trainer/versions/8b10794665aed907bb98a1a5324cd1d3a8bea0e9b31e65210967fb9c9e2e08ed/trainings';
     const destination = 'yldrmerdem1-debug/persona-model';
-    const input_images = persona.trainingZipUrl;
+    const input_images = await resolveTrainingZipInputUrl(persona);
+    if (!input_images) {
+      return Response.json(
+        { error: 'Training images URL could not be resolved' },
+        { status: 500 }
+      );
+    }
+    if (
+      input_images.includes('localhost')
+      || input_images.includes('127.0.0.1')
+      || input_images.includes('0.0.0.0')
+    ) {
+      return Response.json(
+        { error: 'Training images were prepared with a local-only URL. Re-upload the training images after deployment.' },
+        { status: 409 }
+      );
+    }
     const trigger_word = persona.triggerWord ?? 'TOK';
     const lora_type = 'subject';
 

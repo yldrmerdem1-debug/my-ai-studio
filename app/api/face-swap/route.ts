@@ -1,66 +1,28 @@
 import { NextResponse } from 'next/server';
-import Replicate from 'replicate';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createWriteStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import crypto from 'node:crypto';
 import { extractOutputUrlByKind } from '@/lib/replicate-media';
 import { resolveReplicateDownloadUrl } from '@/lib/replicate-media';
 import { isFaceSwapEnabled } from '@/lib/feature-flags';
 import { filterActorPhotosToAllowed } from '@/lib/face-swap-policy';
 import { isTruthy } from '@/lib/consent';
+import { persistGeneratedStream } from '@/lib/generated-assets';
+import { createReplicateClient } from '@/lib/replicate-client';
+import { runReplicateModelWithRetry } from '@/lib/replicate-run';
+import { getSiteUrlFromRequest } from '@/lib/site-url';
 
 export const runtime = 'nodejs';
 
-const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
-});
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-const parseRetryAfterMs = (error: any): number => {
-  const retryAfter = error?.headers?.['retry-after'] || error?.response?.headers?.['retry-after'];
-  if (retryAfter) {
-    const seconds = parseInt(String(retryAfter), 10);
-    if (!isNaN(seconds)) return seconds * 1000;
-  }
-  return 5000;
-};
-
 const runReplicateWithRetry = async (model: string, input: Record<string, any>, maxAttempts = 5) => {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      const output = await replicate.run(model as any, { input });
-      return output;
-    } catch (error: any) {
-      const status = error?.status || error?.response?.status;
-      const message = String(error?.message || '');
-      const lower = message.toLowerCase();
-      const isRateLimit = status === 429 || message.includes('429') || lower.includes('too many requests');
-      const isQueueFull =
-        lower.includes('queue is full') ||
-        lower.includes('try again later') ||
-        (lower.includes('queue') && lower.includes('full'));
-      const isRetryable = isRateLimit || isQueueFull;
-
-      if (!isRetryable || attempt >= maxAttempts) {
-        throw error;
-      }
-
-      const delayMs = isQueueFull
-        ? Math.max(20000, parseRetryAfterMs(error))
-        : parseRetryAfterMs(error);
+  const replicate = createReplicateClient();
+  return runReplicateModelWithRetry(replicate, model, input, {
+    maxAttempts,
+    onRetry: ({ attempt, maxAttempts: totalAttempts, delayMs, isQueueFull }) => {
       if (isQueueFull) {
-        console.warn('Queue full, retrying...', { attempt, maxAttempts, delayMs: delayMs / 1000 + 's' });
+        console.warn('Queue full, retrying...', { attempt, maxAttempts: totalAttempts, delayMs: `${delayMs / 1000}s` });
       } else {
         console.warn('Rate limit hit. Waiting to retry...', { attempt, delayMs });
       }
-      await sleep(delayMs);
-    }
-  }
-  throw new Error('Replicate retry attempts exhausted.');
+    },
+  });
 };
 
 const isReadableStream = (value: any): value is ReadableStream => {
@@ -87,22 +49,11 @@ const findFirstStream = (output: any): ReadableStream | null => {
 };
 
 async function saveStreamToPublic(stream: ReadableStream, extension: string): Promise<string> {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await mkdir(dir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await pipeline(Readable.fromWeb(stream as any), createWriteStream(filePath));
-  return `/generated/${fileName}`;
-}
-
-async function saveBufferToPublic(buffer: ArrayBuffer | Buffer, extension: string): Promise<string> {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await mkdir(dir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-  await writeFile(filePath, buf);
-  return `/generated/${fileName}`;
+  return persistGeneratedStream(stream, {
+    prefix: 'generated/videos',
+    suggestedName: `face-swap.${extension}`,
+    contentType: extension === 'mp4' ? 'video/mp4' : 'application/octet-stream',
+  });
 }
 
 function extractVideoUrl(output: unknown): string {
@@ -197,8 +148,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL
-      || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+    const baseUrl = getSiteUrlFromRequest(req);
     const { allowed, rejected } = filterActorPhotosToAllowed(actorPhotos as Record<string, string>, {
       baseUrl,
       supabaseUrl: process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL,

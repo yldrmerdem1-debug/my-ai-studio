@@ -1,9 +1,11 @@
-import ffmpeg from 'fluent-ffmpeg';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getFfmpeg } from '@/lib/ffmpeg-client';
+import { persistGeneratedBuffer } from '@/lib/generated-assets';
+import { getConfiguredSiteUrl } from '@/lib/site-url';
 import { generateSoundEffectBuffer, generateVoiceBuffer } from '@/lib/voice';
 
 type VideoProcessorInput = {
@@ -32,11 +34,7 @@ const bufferFromDataUrl = (dataUrl: string) => {
   return Buffer.from(base64, 'base64');
 };
 
-const resolveBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return 'http://localhost:3000';
-};
+const resolveBaseUrl = () => getConfiguredSiteUrl();
 
 const requestAudioBuffer = async (
   audioCategory: 'speech' | 'sfx' | 'none',
@@ -118,12 +116,11 @@ const writeTempFile = async (buffer: Buffer, filename: string) => {
 };
 
 const writePublicVideo = async (buffer: Buffer) => {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await fsPromises.mkdir(dir, { recursive: true });
-  const fileName = `voice-${crypto.randomUUID()}.mp4`;
-  const filePath = path.join(dir, fileName);
-  await fsPromises.writeFile(filePath, buffer);
-  return `/generated/${fileName}`;
+  return persistGeneratedBuffer(buffer, {
+    prefix: 'generated/videos',
+    suggestedName: `voice-${crypto.randomUUID()}.mp4`,
+    contentType: 'video/mp4',
+  });
 };
 
 const assertNonEmptyFile = (filePath: string, label: string) => {
@@ -140,6 +137,7 @@ const assertNonEmptyFile = (filePath: string, label: string) => {
 
 const mergeVideoAndAudio = async (videoPath: string, audioPath: string) => {
   const outputPath = path.resolve(os.tmpdir(), `merged-${crypto.randomUUID()}.mp4`);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
@@ -154,7 +152,7 @@ const mergeVideoAndAudio = async (videoPath: string, audioPath: string) => {
         '-c:a aac',
       ])
       .on('end', () => resolve())
-      .on('error', (error, stdout, stderr) => {
+      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
         const details = stderr || stdout || '';
         reject(new Error(`FFmpeg merge failed: ${error?.message || error}\n${details}`));
       })
@@ -163,9 +161,10 @@ const mergeVideoAndAudio = async (videoPath: string, audioPath: string) => {
   return await fsPromises.readFile(outputPath);
 };
 
-const probeDurationSeconds = (filePath: string) => (
-  new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (error, data) => {
+const probeDurationSeconds = async (filePath: string) => {
+  const ffmpeg = await getFfmpeg();
+  return new Promise<number>((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (error: Error | null, data: { format?: { duration?: number } }) => {
       if (error) {
         reject(error);
         return;
@@ -173,8 +172,8 @@ const probeDurationSeconds = (filePath: string) => (
       const duration = Number(data?.format?.duration);
       resolve(Number.isFinite(duration) ? duration : 0);
     });
-  })
-);
+  });
+};
 
 export const mixVideoWithVoiceAndSfx = async ({
   videoUrl,
@@ -206,6 +205,7 @@ export const mixVideoWithVoiceAndSfx = async ({
   const resolvedSfxPath = assertNonEmptyFile(sfxPath, 'SFX');
 
   const outputPath = path.resolve(os.tmpdir(), `mix-${crypto.randomUUID()}.mp4`);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(resolvedVideoPath)
@@ -226,7 +226,7 @@ export const mixVideoWithVoiceAndSfx = async ({
         '[voice][sfx]amix=inputs=2:normalize=0[aout]',
       ])
       .on('end', () => resolve())
-      .on('error', (error, stdout, stderr) => {
+      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
         const details = stderr || stdout || '';
         reject(new Error(`FFmpeg mix failed: ${error?.message || error}\n${details}`));
       })
@@ -288,6 +288,7 @@ export const mixVideoWithDucking = async ({
     : `[1:a]volume=${voiceVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250[voice]`;
 
   const outputPath = path.resolve(os.tmpdir(), `duck-${crypto.randomUUID()}.mp4`);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(resolvedVideoPath)
@@ -315,7 +316,7 @@ export const mixVideoWithDucking = async ({
         `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
       ])
       .on('end', () => resolve())
-      .on('error', (error, stdout, stderr) => {
+      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
         const details = stderr || stdout || '';
         reject(new Error(`FFmpeg ducking mix failed: ${error?.message || error}\n${details}`));
       })
@@ -355,6 +356,7 @@ export const mergeVideoWithAudioUrl = async ({
   const durationSeconds = await probeDurationSeconds(resolvedVideoPath);
   const fadeOutStart = Math.max(0, durationSeconds - 1);
   const outputPath = path.resolve(os.tmpdir(), `merge-${crypto.randomUUID()}.mp4`);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(resolvedVideoPath)
@@ -379,7 +381,7 @@ export const mergeVideoWithAudioUrl = async ({
         `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
       ])
       .on('end', () => resolve())
-      .on('error', (error, stdout, stderr) => {
+      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
         const details = stderr || stdout || '';
         reject(new Error(`FFmpeg merge failed: ${error?.message || error}\n${details}`));
       })
@@ -409,6 +411,7 @@ export const concatVideos = async (videoUrls: string[]): Promise<string> => {
   await fsPromises.writeFile(concatListPath, concatListContent, 'utf-8');
 
   const outputPath = path.resolve(os.tmpdir(), `concat-${crypto.randomUUID()}.mp4`);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
       .input(concatListPath)
@@ -419,7 +422,7 @@ export const concatVideos = async (videoUrls: string[]): Promise<string> => {
         '-movflags', '+faststart',
       ])
       .on('end', () => resolve())
-      .on('error', (error, stdout, stderr) => {
+      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
         const details = stderr || stdout || '';
         reject(new Error(`FFmpeg concat failed: ${error?.message || error}\n${details}`));
       })

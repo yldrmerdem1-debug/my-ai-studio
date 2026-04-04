@@ -1,18 +1,20 @@
 import { NextResponse } from 'next/server';
 import Replicate from 'replicate';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
-import ffmpeg from 'fluent-ffmpeg';
+import { getFfmpeg } from '@/lib/ffmpeg-client';
 import { mixVideoWithDucking } from '@/lib/videoProcessor';
 import { generateAtmosphere, generateSpeech } from '@/lib/audio-service';
 import { generateVoiceBuffer, generateSoundEffectBuffer } from '@/lib/voice';
-import { CINEMATIC_VISUAL_SUFFIX, VIDEO_ENGINES_CONFIG } from '@/lib/constants';
+import {
+  CINEMATIC_VISUAL_SUFFIX,
+  VIDEO_ENGINES_CONFIG,
+  type VideoEngineKey,
+  type VideoQualityPreset,
+} from '@/lib/constants';
 import { buildFluxActionPrompt, isActionLikePrompt } from '@/lib/flux-action-prompts';
 import { SFX_QUALITY_SUFFIX, VOICE_CAST } from '@/lib/voice-constants';
 import { getGeminiModelId } from '@/lib/gemini';
@@ -23,19 +25,24 @@ import {
   extractOutputUrlByKind,
   resolveReplicateDownloadUrl,
 } from '@/lib/replicate-media';
+import { runReplicateModelWithRetry } from '@/lib/replicate-run';
+import { isSensitiveFlag, softenVeoPrompt } from '@/lib/video-generation-safety';
 import { isFaceSwapEnabled } from '@/lib/feature-flags';
 import { filterActorPhotosToAllowed } from '@/lib/face-swap-policy';
 import { ensurePublicAssetUrl } from '@/lib/public-asset-url';
 import { ensurePromptHasTriggers, uniqStrings, withDownloadTrue } from '@/lib/lora-utils';
 import { readPersonas } from '@/lib/persona-registry';
+import { normalizePersonaSubjectType } from '@/lib/persona-subject';
 import { enhancePrompt } from '@/lib/services/prompt-enhancer';
 import { generateXaiVideo } from '@/lib/xai-video';
 import { generateVideoWithFallback } from '@/lib/services/video-service';
 import { ModelKey } from '@/config/models';
 import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
 import { isTruthy } from '@/lib/consent';
-import { isPremiumUser } from '@/lib/subscription';
-import { createRunwayImageToVideoTask, type RunwayI2VModel } from '@/lib/runway';
+import { createRunwayImageToVideoTask, type RunwayI2VModel, type RunwayI2VRatio } from '@/lib/runway';
+import { getConfiguredSiteUrl, getSiteUrlFromRequest } from '@/lib/site-url';
+import { AdmissionError, enterVideoAdmission } from '@/lib/video-admission';
+import { persistGeneratedBuffer, persistGeneratedStream } from '@/lib/generated-assets';
 
 export const runtime = 'nodejs';
 
@@ -59,96 +66,84 @@ const normalizeDurationForEngine = (engine: string, body: any): number | null =>
   return supported.includes(def) ? def : (supported[0] ?? 5);
 };
 
+const normalizeQualityPreset = (raw: unknown): VideoQualityPreset => {
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (normalized === '480p' || normalized === '720p' || normalized === '1080p' || normalized === '1584x672') {
+    return normalized as VideoQualityPreset;
+  }
+  if (normalized === '4k' || normalized === '2160p' || normalized === 'uhd') return '1080p';
+  if (normalized === 'pro' || normalized === 'balanced' || normalized === 'quality') {
+    return '720p';
+  }
+  if (normalized === 'fast' || normalized === 'low' || normalized === 'standard') return '480p';
+  if (normalized === 'high') return '720p';
+  if (normalized === 'ultra') return '1080p';
+  return '720p';
+};
+
+const QUALITY_PRESET_RUNTIME: Record<
+  VideoQualityPreset,
+  {
+    personaInferenceSteps: number;
+    personaAnchorCandidates: number;
+    runwayRatio: RunwayI2VRatio;
+    xaiResolution: '480p' | '720p' | '1080p';
+  }
+> = {
+  '480p': {
+    personaInferenceSteps: 55,
+    personaAnchorCandidates: 2,
+    runwayRatio: '1280:720',
+    xaiResolution: '480p',
+  },
+  '720p': {
+    personaInferenceSteps: 65,
+    personaAnchorCandidates: 3,
+    runwayRatio: '1280:720',
+    xaiResolution: '720p',
+  },
+  '1080p': {
+    personaInferenceSteps: 80,
+    personaAnchorCandidates: 5,
+    runwayRatio: '1584:672',
+    xaiResolution: '1080p',
+  },
+  '1584x672': {
+    personaInferenceSteps: 80,
+    personaAnchorCandidates: 5,
+    runwayRatio: '1584:672',
+    xaiResolution: '1080p',
+  },
+};
+
+const PERSONA_REFERENCE_RUNTIME = {
+  inferenceSteps: 80,
+  anchorCandidates: 1,
+  guidanceScale: 4.8,
+} as const;
+
+const clampFluxInferenceSteps = (steps: number) =>
+  Math.max(1, Math.min(50, Math.round(Number(steps) || 50)));
+
+const normalizeLower = (value: unknown) => String(value || '').trim().toLowerCase();
+const isFluxModelRef = (value: unknown) => {
+  const normalized = normalizeLower(value);
+  return !normalized || normalized.includes('flux');
+};
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const isSensitiveFlag = (error: any) => {
-  const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('flagged as sensitive') || message.includes('e005') || message.includes('sensitive');
-};
-
-const softenVeoPrompt = (prompt: string, level: 1 | 2 | 3) => {
-  let softened = prompt;
-  const safetyTail = ' no blood, no injury, no harm, no violence, no weapons, no killing, family-friendly action.';
-  const swaps: Array<[RegExp, string]> = [
-    [/\bstrike\b/gi, 'forceful move'],
-    [/\bpowerful\b/gi, 'dramatic'],
-    [/\bimpact\b/gi, 'shockwave'],
-    [/\bhit\b/gi, 'push'],
-    [/\bpunch\b/gi, 'gesture'],
-    [/\bknock(ed)?\b/gi, 'send'],
-    [/\bflying backwards\b/gi, 'sliding backward'],
-    [/\bexecuting\b/gi, 'performing'],
-    [/\btough\b/gi, 'determined'],
-  ];
-  if (level >= 1) {
-    for (const [re, rep] of swaps) softened = softened.replace(re, rep);
-    if (!softened.toLowerCase().includes('no blood')) softened += ` ${safetyTail}`;
-  }
-  if (level >= 2) {
-    softened = softened.replace(/\b(stunt choreography)\b/gi, 'stage choreography (no contact)');
-    softened += ' show no physical contact; depict a near-miss or shockwave-only moment.';
-  }
-  if (level >= 3) {
-    softened = 'dynamic cinematic shot, dramatic gesture, motion blur, kinetic camera, dramatic lighting, family-friendly action, no violence, no injury, no blood.';
-  }
-  return softened.trim();
-};
-
-const parseRetryAfterMs = (error: any) => {
-  const headerValue =
-    error?.response?.headers?.get?.('retry-after')
-    || error?.headers?.get?.('retry-after')
-    || error?.response?.headers?.['retry-after']
-    || error?.response?.headers?.['Retry-After'];
-  if (headerValue) {
-    const seconds = Number(headerValue);
-    if (!Number.isNaN(seconds)) {
-      return Math.max(0, Math.round(seconds * 1000));
-    }
-  }
-  const message = String(error?.message || '');
-  const match = message.match(/retry_after[:\s]+(\d+)/i) || message.match(/retry after[:\s]+(\d+)/i);
-  if (match && match[1]) {
-    const seconds = Number(match[1]);
-    if (!Number.isNaN(seconds)) {
-      return Math.max(0, Math.round(seconds * 1000));
-    }
-  }
-  return 10000;
-};
-
 const runReplicateWithRetry = async (model: string, input: Record<string, any>, maxAttempts = 5) => {
-  const modelId = model as `${string}/${string}` | `${string}/${string}:${string}`;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await replicate.run(modelId, { input });
-    } catch (error: any) {
-      const status = error?.status || error?.response?.status;
-      const message = String(error?.message || '');
-      const lower = message.toLowerCase();
-      const isRateLimit = status === 429 || message.includes('429') || lower.includes('too many requests');
-      const isQueueFull =
-        lower.includes('queue is full') ||
-        lower.includes('try again later') ||
-        (lower.includes('queue') && lower.includes('full'));
-      const isRetryable = isRateLimit || isQueueFull;
-
-      if (!isRetryable || attempt >= maxAttempts) {
-        throw error;
-      }
-
-      const delayMs = isQueueFull
-        ? Math.max(20000, parseRetryAfterMs(error))
-        : parseRetryAfterMs(error);
+  return runReplicateModelWithRetry(replicate, model, input, {
+    maxAttempts,
+    onRetry: ({ attempt, maxAttempts: totalAttempts, delayMs, isQueueFull }) => {
       if (isQueueFull) {
-        console.warn('Queue full, retrying...', { attempt, maxAttempts, delayMs: delayMs / 1000 + 's' });
+        console.warn('Queue full, retrying...', { attempt, maxAttempts: totalAttempts, delayMs: `${delayMs / 1000}s` });
       } else {
         console.warn('Rate limit hit. Waiting to retry...', { attempt, delayMs });
       }
-      await sleep(delayMs);
-    }
-  }
-  throw new Error('Replicate retry attempts exhausted.');
+    },
+  });
 };
 
 const isReadableStream = (value: any): value is ReadableStream => {
@@ -257,21 +252,19 @@ async function uploadStreamToReplicate(stream: ReadableStream, token: string): P
 }
 
 async function saveStreamToPublic(stream: ReadableStream, extension: string): Promise<string> {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await mkdir(dir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await pipeline(Readable.fromWeb(stream as any), createWriteStream(filePath));
-  return `/generated/${fileName}`;
+  return persistGeneratedStream(stream, {
+    prefix: extension === 'mp4' ? 'generated/videos' : 'generated/images',
+    suggestedName: `generate-video.${extension}`,
+    contentType: extension === 'mp4' ? 'video/mp4' : 'image/png',
+  });
 }
 
 async function saveBufferToPublic(buffer: Buffer, extension: string): Promise<string> {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await mkdir(dir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await writeFile(filePath, buffer);
-  return `/generated/${fileName}`;
+  return persistGeneratedBuffer(buffer, {
+    prefix: extension === 'mp4' ? 'generated/videos' : 'generated/images',
+    suggestedName: `generate-video.${extension}`,
+    contentType: extension === 'mp4' ? 'video/mp4' : 'image/png',
+  });
 }
 
 async function extractFirstFrameToPng(videoUrl: string): Promise<string> {
@@ -294,12 +287,13 @@ async function extractFirstFrameToPng(videoUrl: string): Promise<string> {
   const inputPath = path.join(tempDir, `input-${crypto.randomUUID()}.mp4`);
   const outputPath = path.join(tempDir, `frame-${crypto.randomUUID()}.png`);
   await writeFile(inputPath, media.buffer);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg(inputPath)
       .outputOptions(['-y', '-frames:v 1'])
       .save(outputPath)
       .on('end', () => resolve())
-      .on('error', (error) => reject(new Error(`FFmpeg frame extraction failed: ${error?.message || error}`)));
+      .on('error', (error: Error) => reject(new Error(`FFmpeg frame extraction failed: ${error?.message || error}`)));
   });
   const frame = await (await import('node:fs/promises')).readFile(outputPath);
   return await saveBufferToPublic(frame, 'png');
@@ -326,12 +320,13 @@ async function extractLastFrameToPng(videoUrl: string): Promise<string> {
   const inputPath = path.join(tempDir, `input-${crypto.randomUUID()}.mp4`);
   const outputPath = path.join(tempDir, `frame-${crypto.randomUUID()}.png`);
   await writeFile(inputPath, media.buffer);
+  const ffmpeg = await getFfmpeg();
   await new Promise<void>((resolve, reject) => {
     ffmpeg(inputPath)
       .outputOptions(['-y', '-vf', 'select=eq(n\\,-1)', '-frames:v', '1'])
       .save(outputPath)
       .on('end', () => resolve())
-      .on('error', (error) => reject(new Error(`FFmpeg last frame extraction failed: ${error?.message || error}`)));
+      .on('error', (error: Error) => reject(new Error(`FFmpeg last frame extraction failed: ${error?.message || error}`)));
   });
   const frame = await (await import('node:fs/promises')).readFile(outputPath);
   return await saveBufferToPublic(frame, 'png');
@@ -564,6 +559,91 @@ function extractVideoUrl(output: unknown): string {
   return extractOutputUrlByKind(output, 'video');
 }
 
+const collectImageCandidateUrls = (value: unknown, acc: string[] = []): string[] => {
+  if (!value) return acc;
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s) return acc;
+    if (s.startsWith('data:image/')) {
+      acc.push(s);
+      return acc;
+    }
+    if (/^https?:\/\//i.test(s) || s.startsWith('/generated/')) {
+      acc.push(s);
+    }
+    return acc;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectImageCandidateUrls(item, acc);
+    return acc;
+  }
+  if (typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      collectImageCandidateUrls(v, acc);
+    }
+  }
+  return acc;
+};
+
+const selectBestPersonaAnchor = async (
+  candidates: string[],
+  context: { userIntent: string; isAction: boolean }
+): Promise<string> => {
+  const unique = uniqStrings(candidates.filter(Boolean)).slice(0, 4);
+  if (unique.length <= 1 || !process.env.GEMINI_API_KEY) {
+    return unique[0] || '';
+  }
+  try {
+    const preferredModel = 'gemini-2.5-flash';
+    const resolvedModel = await getGeminiModelId(process.env.GEMINI_API_KEY, preferredModel);
+    const visionModel = genAI.getGenerativeModel({
+      model: resolvedModel,
+      generationConfig: { temperature: 0.1 },
+    });
+    const scorePrompt = `
+You are selecting the BEST reference frame for identity-preserving image-to-video.
+Score this frame in JSON only:
+{
+  "identity_score": 0-100,
+  "face_clarity_score": 0-100,
+  "composition_score": 0-100,
+  "artifact_penalty": 0-100,
+  "overall_score": 0-100,
+  "reason": "short"
+}
+Priorities:
+1) Same face identity consistency (highest weight)
+2) Face visibility and sharpness (eyes, jawline, skin details)
+3) Cinematic composition for motion start
+4) Penalize blur, distortion, extra faces overriding subject
+Intent: "${context.userIntent}"
+Action scene: ${context.isAction ? 'yes' : 'no'}
+Return ONLY JSON.
+`.trim();
+    const scored = await Promise.all(
+      unique.map(async (url) => {
+        try {
+          const inlineData = await getImageInlineData(url);
+          const res = await visionModel.generateContent([{ text: scorePrompt }, { inlineData }]);
+          const parsed = extractGeminiJson(res.response.text().trim()) as any;
+          const overall = Number(parsed?.overall_score);
+          return {
+            url,
+            score: Number.isFinite(overall) ? overall : 0,
+          };
+        } catch {
+          return { url, score: 0 };
+        }
+      })
+    );
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0]?.url || unique[0];
+  } catch (e) {
+    console.warn('Persona anchor ranking failed; using first candidate.', (e as Error)?.message || e);
+    return unique[0];
+  }
+};
+
 const normalizeReplicateAssetUrl = async (url: string) => {
   const replicateFilePrefix = 'https://api.replicate.com/v1/files/';
   if (url && url.includes('api.replicate.com/v1/files/')) {
@@ -585,16 +665,24 @@ const resolveReplicatePublicUrl = async (url: string) => {
   return url;
 };
 
-const resolveBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return 'http://localhost:3000';
-};
+const resolveBaseUrl = () => getConfiguredSiteUrl();
 
 const ensureAbsoluteUrl = (url: string) => {
   if (!url) return url;
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  if (url.startsWith('/')) return `${resolveBaseUrl()}${url}`;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    // Replicate cannot access localhost URLs
+    if (url.includes('localhost:3000')) {
+      console.warn('⚠️ WARNING: Using localhost URL with external API (Replicate). This will fail unless you are using a tunnel.');
+    }
+    return url;
+  }
+  
+  const baseUrl = resolveBaseUrl();
+  if (baseUrl.includes('localhost')) {
+    console.warn('⚠️ WARNING: Resolving relative URL to localhost. External APIs like Replicate cannot access localhost:3000.');
+  }
+  
+  if (url.startsWith('/')) return `${baseUrl}${url}`;
   return url;
 };
 
@@ -603,10 +691,30 @@ const uploadUrlToReplicate = async (url: string, filename: string, contentType: 
   if (!token) {
     throw new Error('REPLICATE_API_TOKEN not configured');
   }
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch asset for upload: ${response.status}`);
+  
+  // If the URL is localhost, we cannot fetch it directly if we are in a serverless environment
+  // But since this is a Next.js API route, we might be able to fetch it if the server is running
+  let response;
+  try {
+    response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch asset for upload: ${response.status}`);
+    }
+  } catch (e) {
+    // If fetch fails (e.g. Connection refused on localhost), try to read from local file system
+    if (url.includes('localhost') || url.includes('127.0.0.1')) {
+      try {
+        const urlObj = new URL(url);
+        const localPath = path.join(process.cwd(), 'public', urlObj.pathname);
+        const buffer = await readFile(localPath);
+        return await uploadBufferToReplicate(buffer, filename, contentType);
+      } catch (fsError) {
+        console.warn('Failed to read local file fallback:', fsError);
+      }
+    }
+    throw e;
   }
+  
   const buffer = await response.arrayBuffer();
   const blob = new Blob([buffer], { type: contentType });
   const form = new FormData();
@@ -827,10 +935,57 @@ const ensureReplicateUri = async (url: string, filename: string, contentType: st
   if (!url) return url;
   const absolute = ensureAbsoluteUrl(url);
   const isLocal = absolute.includes('localhost') || absolute.includes('127.0.0.1') || absolute.includes('0.0.0.0');
+  
   if (isLocal || absolute.startsWith('/')) {
-    return await uploadUrlToReplicate(absolute, filename, contentType);
+    // If it's a local URL, we need to upload its content to Replicate so Replicate can access it
+    try {
+      // If it's a local file path starting with /generated, we can read it directly from disk in dev mode
+      if (isLocal && absolute.includes('/generated/')) {
+        const urlObj = new URL(absolute);
+        const localPath = path.join(process.cwd(), 'public', urlObj.pathname);
+        const buffer = await readFile(localPath);
+        return await uploadBufferToReplicate(buffer, filename, contentType);
+      }
+      
+      // Fallback to fetch if not a local file we can read
+      return await uploadUrlToReplicate(absolute, filename, contentType);
+    } catch (e) {
+      console.warn('Failed to upload local URL to Replicate:', e);
+      // Fallback to uploading via storage provider if direct upload fails
+      return await ensureExternallyFetchableImageUrl(absolute);
+    }
   }
   return await resolveReplicatePublicUrl(absolute);
+};
+
+const prepareLoraUrlForReplicate = async (
+  url: string,
+  index = 0,
+  options?: { preferDirectHfUrl?: boolean }
+): Promise<string> => {
+  const absolute = ensureAbsoluteUrl(String(url || '').trim());
+  if (!absolute) return '';
+  const looksLikeHuggingFace = /huggingface\.co/i.test(absolute);
+  if (!looksLikeHuggingFace) {
+    return absolute;
+  }
+  if (options?.preferDirectHfUrl) {
+    return absolute;
+  }
+  console.log('🧪 PREPARING HF LORA FOR REPLICATE:', absolute);
+  const response = await fetch(absolute);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Hugging Face LoRA: ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const uploaded = await uploadBufferToReplicate(
+    buffer,
+    `persona-lora-${index + 1}.safetensors`,
+    contentType
+  );
+  console.log('✅ HF LORA RE-UPLOADED FOR REPLICATE:', uploaded);
+  return uploaded;
 };
 
 const ensureExternallyFetchableImageUrl = async (url: string): Promise<string> => {
@@ -840,27 +995,82 @@ const ensureExternallyFetchableImageUrl = async (url: string): Promise<string> =
     absolute.includes('localhost') || absolute.includes('127.0.0.1') || absolute.includes('0.0.0.0');
   if (!isLocal && absolute.startsWith('http')) return absolute;
 
-  // In dev, provider backends can't fetch localhost URLs. Upload to storage and return a signed URL.
+  let mediaBuffer: Buffer | null = null;
+  let contentType = 'image/jpeg';
+
   try {
-    const media = await downloadMediaWithValidation(absolute, {
-      token: process.env.REPLICATE_API_TOKEN || '',
-      expectedKind: 'image',
-      strictExpectedKind: false,
-      logger: {
-        info: (...args) => console.log(...args),
-        warn: (...args) => console.warn(...args),
-      },
-    });
-    const contentType = media.contentType || 'image/jpeg';
+    // If it's a local URL, try reading from disk first to avoid network issues.
+    if (isLocal && absolute.includes('/generated/')) {
+      const urlObj = new URL(absolute);
+      const localPath = path.join(process.cwd(), 'public', urlObj.pathname);
+      mediaBuffer = await readFile(localPath);
+      contentType = absolute.endsWith('.png') ? 'image/png' : 'image/jpeg';
+    } else {
+      if (isLocal) {
+        throw new Error(`Cannot fetch localhost URL directly: ${absolute}`);
+      }
+
+      const media = await downloadMediaWithValidation(absolute, {
+        token: process.env.REPLICATE_API_TOKEN || '',
+        expectedKind: 'image',
+        strictExpectedKind: false,
+        logger: {
+          info: (...args) => console.log(...args),
+          warn: (...args) => console.warn(...args),
+        },
+      });
+      mediaBuffer = media.buffer;
+      contentType = media.contentType || 'image/jpeg';
+    }
+
     const storage = getStorageProvider();
     const key = makeStorageObjectKey('generated/anchor-frames', contentType, 'anchor.jpg');
-    await storage.upload(media.buffer, contentType, key);
+    await storage.upload(mediaBuffer, contentType, key);
     const signed = await storage.getSignedUrl(key, 60 * 60);
     console.log('✅ Uploaded local anchor frame to storage for providers.');
     return signed;
   } catch (e: any) {
-    console.warn('⚠️ Could not upload local image to storage; using absolute URL (may fail for Fal/Replicate in dev).', e?.message || e);
+    console.warn('⚠️ Storage upload for external image access failed, trying Replicate file upload.', e?.message || e);
+
+    if (mediaBuffer) {
+      try {
+        const filename = contentType.includes('png') ? 'anchor.png' : 'anchor.jpg';
+        const replicateFileUrl = await uploadBufferToReplicate(mediaBuffer, filename, contentType);
+        console.log('✅ Uploaded anchor frame to Replicate files for external providers.');
+        return replicateFileUrl;
+      } catch (replicateUploadError: any) {
+        console.warn('⚠️ Replicate file upload fallback failed; last resort will use absolute URL.', replicateUploadError?.message || replicateUploadError);
+      }
+    }
+
     return absolute;
+  }
+};
+
+const ensureRunwayPromptImage = async (url: string): Promise<string> => {
+  try {
+    return await ensurePublicAssetUrl(
+      { url },
+      {
+        token: process.env.REPLICATE_API_TOKEN || '',
+        resolveAbsoluteUrl: ensureAbsoluteUrl,
+        bypassReplicateFileApi: false,
+        logger: { info: (...a: unknown[]) => console.log(...a), warn: (...a: unknown[]) => console.warn(...a) },
+      }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('⚠️ Runway prompt image storage conversion failed, falling back to data URL:', message);
+
+    const absolute = ensureAbsoluteUrl(url);
+    const media = await downloadMediaWithValidation(absolute, {
+      token: process.env.REPLICATE_API_TOKEN || '',
+      expectedKind: 'image',
+      strictExpectedKind: false,
+      logger: { info: (...a: unknown[]) => console.log(...a), warn: (...a: unknown[]) => console.warn(...a) },
+    });
+    const contentType = String(media.contentType || 'image/jpeg').split(';')[0].trim().toLowerCase() || 'image/jpeg';
+    return `data:${contentType};base64,${media.buffer.toString('base64')}`;
   }
 };
 
@@ -871,16 +1081,28 @@ const generateSfxAudioUrl = async (prompt: string) => {
 export async function POST(req: Request) {
   console.log('🚀 STRICT PIPELINE STARTING...');
 
+  let releaseAdmission: (() => void) | null = null;
   try {
     const body = await req.json();
     console.log('🧪 REQUEST BODY:', body);
+    const userId = String(body?.user?.id || body?.userId || '').trim() || undefined;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'User authentication required', code: 'USER_REQUIRED' },
+        { status: 401 }
+      );
+    }
+    const requestIp =
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+      || req.headers.get('x-real-ip')
+      || 'unknown';
+    releaseAdmission = enterVideoAdmission({ userId, ip: requestIp }).release;
 
     // Optional async mode: return jobId immediately, run generation in background
     if (body?.async === true) {
       const jobId = 'job_' + crypto.randomUUID();
-      setJob(jobId, { status: 'pending' });
-      const origin = process.env.NEXT_PUBLIC_SITE_URL
-        || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+      await setJob(jobId, { status: 'pending', userId });
+      const origin = getSiteUrlFromRequest(req);
       const bodySync = { ...body, async: false };
       fetch(`${origin}/api/generate-video`, {
         method: 'POST',
@@ -889,10 +1111,22 @@ export async function POST(req: Request) {
       })
         .then(async (res) => {
           const data = await res.json().catch(() => ({}));
-          if (res.ok) setJob(jobId, { status: 'succeeded', result: data });
-          else setJob(jobId, { status: 'failed', error: (data as { error?: string; details?: string }).error || (data as { details?: string }).details || 'Request failed' });
+          if (res.ok) {
+            const nestedVideoId = typeof (data as { videoId?: string })?.videoId === 'string'
+              ? String((data as { videoId?: string }).videoId).trim()
+              : '';
+            const hasFinalVideoUrl = typeof (data as { videoUrl?: string })?.videoUrl === 'string'
+              && String((data as { videoUrl?: string }).videoUrl).trim().length > 0;
+
+            if (nestedVideoId && !hasFinalVideoUrl) {
+              await setJob(jobId, { status: 'pending', result: data, userId });
+            } else {
+              await setJob(jobId, { status: 'succeeded', result: data, userId });
+            }
+          }
+          else await setJob(jobId, { status: 'failed', error: (data as { error?: string; details?: string }).error || (data as { details?: string }).details || 'Request failed', userId });
         })
-        .catch((e) => setJob(jobId, { status: 'failed', error: (e as Error).message }));
+        .catch(async (e) => await setJob(jobId, { status: 'failed', error: (e as Error).message, userId }));
       return NextResponse.json({ videoId: jobId });
     }
 
@@ -924,13 +1158,6 @@ export async function POST(req: Request) {
       );
     }
 
-    if (enableFaceSwap && !isPremiumUser(body?.user)) {
-      return NextResponse.json(
-        { error: 'Premium required for face swap' },
-        { status: 402 }
-      );
-    }
-
     if (enableFaceSwap && !isTruthy(body?.faceSwapConsent)) {
       return NextResponse.json(
         { error: 'Face swap consent is required' },
@@ -939,8 +1166,7 @@ export async function POST(req: Request) {
     }
     
     // Ensure actor photo URLs are absolute so Replicate can fetch them
-    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL 
-      || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+    const baseUrl = getSiteUrlFromRequest(req);
 
     // Reduce abuse: only allow actor photo URLs from same origin or Supabase storage.
     if (enableFaceSwap && actorPhotos) {
@@ -1038,6 +1264,12 @@ export async function POST(req: Request) {
       || (typeof body?.persona?.storagePath === 'string' ? body.persona.storagePath : '')
       || (typeof body?.storage_path === 'string' ? body.storage_path : '')
       || (typeof body?.storagePath === 'string' ? body.storagePath : '');
+    const explicitReferenceImage =
+      (typeof body?.sourceImage === 'string' && body.sourceImage.trim())
+      || (typeof body?.reference_image_url === 'string' && body.reference_image_url.trim())
+      || (typeof body?.referenceImage === 'string' && body.referenceImage.trim())
+      || bodyReferenceImageUrl
+      || '';
 
     // Default to grok when engine is not specified (quick generate / frictionless UX).
     const fallbackEngineFromBooleans =
@@ -1085,6 +1317,14 @@ export async function POST(req: Request) {
     const runwayModelRaw = String((body as any)?.runwayModel || (body as any)?.runway_model || (body as any)?.runway?.model || 'gen4.5').trim();
     const runwayModelAllowed: RunwayI2VModel[] = ['gen4.5', 'gen4_turbo', 'gen3a_turbo', 'veo3', 'veo3.1', 'veo3.1_fast'];
     const runwayModel: RunwayI2VModel = runwayModelAllowed.includes(runwayModelRaw as any) ? (runwayModelRaw as RunwayI2VModel) : 'gen4.5';
+    const engineQualityCfg = VIDEO_ENGINES_CONFIG[engine as VideoEngineKey] || VIDEO_ENGINES_CONFIG.grok;
+    const requestedQuality = normalizeQualityPreset(body?.qualityPreset ?? body?.videoQuality ?? body?.quality);
+    const qualityPreset = engineQualityCfg.supportedQualities.includes(requestedQuality)
+      ? requestedQuality
+      : engineQualityCfg.defaultQuality;
+    const qualityRuntime = QUALITY_PRESET_RUNTIME[qualityPreset];
+    const preferredXaiResolution =
+      String(process.env.XAI_VIDEO_RESOLUTION || qualityRuntime.xaiResolution).trim() || qualityRuntime.xaiResolution;
 
     // Enhance prompt with detected characters for better video generation
     let enhancedPrompt = userPrompt || prompt || 'cinematic shot of a person moving';
@@ -1129,11 +1369,29 @@ export async function POST(req: Request) {
         .replace(/\bviolence\b/gi, 'high stakes action')
         .replace(/\bgore\b/gi, 'dramatic tension')
     );
-    const personaActive = Boolean(resolvedPersonaModelId || resolvedTriggerWord);
+    const hasPersonaPayload =
+      Boolean((body as any)?.persona)
+      || (Array.isArray((body as any)?.personas) && (body as any).personas.length > 0);
+    const hasPersonaIdHints =
+      Boolean(String((body as any)?.personaId || '').trim())
+      || (Array.isArray((body as any)?.personaIds) && (body as any).personaIds.length > 0);
+    const personaActive = Boolean(resolvedPersonaModelId || resolvedTriggerWord || hasPersonaPayload || hasPersonaIdHints);
+    const personaSubjectTypes = uniqStrings([
+      ...(Array.isArray((body as any)?.personas) ? (body as any).personas : [])
+        .flatMap((p: any) => [p?.subjectType, p?.subject_type]),
+      (body as any)?.persona?.subjectType,
+      (body as any)?.persona?.subject_type,
+      (body as any)?.subjectType,
+      (body as any)?.subject_type,
+    ])
+      .map((value) => normalizePersonaSubjectType(value))
+      .filter((value): value is NonNullable<typeof value> => Boolean(value));
+    const resolvedPersonaSubjectType = personaSubjectTypes[0];
+    const isHumanPersonaSubject = !resolvedPersonaSubjectType || resolvedPersonaSubjectType === 'human';
     const genderRaw = (body as any)?.persona?.gender ?? (body as any)?.gender;
     let personaGender: 'male' | 'female' | undefined =
-      genderRaw === 'male' || genderRaw === 'female' ? genderRaw : undefined;
-    if (personaActive && !personaGender) {
+      isHumanPersonaSubject && (genderRaw === 'male' || genderRaw === 'female') ? genderRaw : undefined;
+    if (personaActive && isHumanPersonaSubject && !personaGender) {
       try {
         const personaIdHint = String((body as any)?.personaId || (body as any)?.id || '').trim();
         const all = await readPersonas();
@@ -1148,16 +1406,67 @@ export async function POST(req: Request) {
         console.warn('Persona gender lookup failed; continuing without gender.', String(e?.message || e));
       }
     }
-    if (personaActive && personaGender) {
+    if (personaActive) {
       try {
         const token = String(resolvedTriggerWord || '').trim();
         const withToken = token ? `${token} ${normalizedPrompt}`.trim() : normalizedPrompt;
-        normalizedPrompt = await enhancePrompt(withToken, true, personaGender);
+        normalizedPrompt = isHumanPersonaSubject
+          ? await enhancePrompt(withToken, true, personaGender)
+          : await enhancePrompt(withToken, false);
       } catch (e: any) {
         console.warn('Prompt enhancer failed; continuing with normalized prompt.', String(e?.message || e));
       }
     }
     const safeUserIdea = normalizedPrompt;
+    const personaAnchorCandidateCount = Math.max(
+      1,
+      Math.min(
+        6,
+        Number(process.env.PERSONA_ANCHOR_CANDIDATES || '') || PERSONA_REFERENCE_RUNTIME.anchorCandidates
+      )
+    );
+    const personaAnchorInferenceSteps = Math.max(
+      20,
+      Math.min(
+        100,
+        Number(process.env.PERSONA_ANCHOR_STEPS || '') || PERSONA_REFERENCE_RUNTIME.inferenceSteps
+      )
+    );
+    const personaGuidanceScale = Math.max(
+      3.5,
+      Math.min(
+        6.0,
+        Number(process.env.PERSONA_ANCHOR_GUIDANCE || '') || PERSONA_REFERENCE_RUNTIME.guidanceScale
+      )
+    );
+    const fluxSafeInferenceSteps = clampFluxInferenceSteps(personaAnchorInferenceSteps);
+    const highQualityLoraSteps = clampFluxInferenceSteps(
+      Number(process.env.PERSONA_HQ_LORA_STEPS || '') || personaAnchorInferenceSteps
+    );
+    const highQualityLoraModel = String(
+      process.env.REPLICATE_HIGH_QUALITY_LORA_MODEL || 'black-forest-labs/flux-dev-lora'
+    ).trim();
+    const personaAnchorPrefix = isHumanPersonaSubject
+      ? 'identity-locked subject, same person as trained persona, close-up to medium close-up framing, face centered, clear eyes, natural skin texture, symmetric facial proportions, ultra-sharp facial details, no facial distortion, no face drift,'
+      : resolvedPersonaSubjectType === 'animal'
+        ? 'identity-locked subject, same exact animal as trained persona, preserve species, fur pattern, face markings, eye color, anatomy, and body proportions, subject centered, ultra-sharp texture details, no anatomy distortion, no identity drift,'
+        : resolvedPersonaSubjectType === 'product'
+          ? 'identity-locked hero product, same exact product as trained persona, preserve exact silhouette, shape, proportions, materials, reflections, surface finish, buttons, ports, seams, and logo placement, centered commercial framing, no deformation, no extra parts,'
+          : 'identity-locked subject, same exact trained subject, preserve defining silhouette, proportions, texture, markings, and distinctive features, centered framing, no deformation, no identity drift,';
+    const personaActionAnchorPrefix = isHumanPersonaSubject
+      ? 'dynamic cinematic action still, foreground subject dominance, medium shot with face clearly visible, dense environment/crowd allowed in background, shallow depth of field to protect facial detail, identity-locked subject, same person as trained persona, sharp eyes and jawline details, no facial distortion, no face drift,'
+      : resolvedPersonaSubjectType === 'animal'
+        ? 'dynamic cinematic wildlife still, identity-locked subject, same exact animal as trained persona, preserve anatomy, fur pattern, markings, and eye color, subject dominant in frame, no anatomy distortion, no identity drift,'
+        : resolvedPersonaSubjectType === 'product'
+          ? 'dynamic commercial hero shot, identity-locked product, same exact product as trained persona, preserve silhouette, proportions, materials, reflections, ports, buttons, seams, and logo placement, product dominant in frame, no deformation, no extra parts,'
+          : 'dynamic hero shot, identity-locked subject, same exact trained subject, preserve silhouette, proportions, texture, markings, and defining features, subject dominant in frame, no deformation, no identity drift,';
+    const personaIdentityVideoRule = isHumanPersonaSubject
+      ? 'Maintain the exact same face identity from the reference image in every frame; no face morphing, no identity drift, no age/gender change, no face replacement, no heavy blur or occlusion over the face.'
+      : resolvedPersonaSubjectType === 'animal'
+        ? 'Maintain the exact same animal identity from the reference image in every frame; no species change, no fur-pattern drift, no anatomy distortion, no marking changes, and no extra limbs or features.'
+        : resolvedPersonaSubjectType === 'product'
+          ? 'Maintain the exact same product identity from the reference image in every frame; no silhouette drift, no proportion changes, no extra buttons or parts, no logo changes, and no material or color mismatch.'
+          : 'Maintain the exact same trained subject identity from the reference image in every frame; no silhouette drift, no proportion changes, no texture or marking drift, and no extra features or deformations.';
     const audioPrompt = `${originalPrompt}, heavy impact sounds, fighting sfx, grunts, aggressive atmosphere`;
     const personaName =
       body?.persona?.name
@@ -1209,8 +1518,108 @@ export async function POST(req: Request) {
         console.warn('[generate-video] readPersonas failed while resolving personaIds:', (e as Error)?.message ?? e);
       }
     }
+    if (loadedPersonas.length === 0) {
+      try {
+        const hintedPersonaIds = uniqStrings([
+          (body as any)?.personaId,
+          (body as any)?.id,
+          resolvedPersonaModelId,
+        ]);
+        if (hintedPersonaIds.length > 0) {
+          const all = await readPersonas();
+          loadedPersonas = all.filter((p: any) =>
+            hintedPersonaIds.includes(p?.personaId)
+            || hintedPersonaIds.includes(p?.trainingId)
+            || hintedPersonaIds.includes(p?.modelId)
+            || hintedPersonaIds.includes(p?.destinationModel)
+          );
+        }
+      } catch (e) {
+        console.warn('[generate-video] persona hint lookup failed:', (e as Error)?.message ?? e);
+      }
+    }
     const personaPool = [...providedPersonas, ...loadedPersonas];
     const hfUrls = uniqStrings(personaPool.map((p: any) => p?.huggingFaceUrl || p?.huggingface_url)).map(withDownloadTrue);
+    const resolvedDestinationModel = uniqStrings([
+      ...personaPool.flatMap((p: any) => [p?.destinationModel, p?.destination_model]),
+      (body as any)?.persona?.destinationModel,
+      (body as any)?.persona?.destination_model,
+      (body as any)?.destinationModel,
+      (body as any)?.destination_model,
+    ])[0] || '';
+    const resolvedTrainingBaseModel = uniqStrings([
+      ...personaPool.flatMap((p: any) => [p?.trainingBaseModel, p?.training_base_model]),
+      (body as any)?.persona?.trainingBaseModel,
+      (body as any)?.persona?.training_base_model,
+      (body as any)?.trainingBaseModel,
+      (body as any)?.training_base_model,
+    ])[0] || '';
+    const personaModelFamilies = uniqStrings([
+      ...personaPool.flatMap((p: any) => [p?.modelFamily, p?.model_family]),
+      (body as any)?.persona?.modelFamily,
+      (body as any)?.persona?.model_family,
+      (body as any)?.modelFamily,
+      (body as any)?.model_family,
+    ]).map((value) => normalizeLower(value));
+    const hasUnsupportedLegacyPersona =
+      personaModelFamilies.some((value) => value && value !== 'flux-lora')
+      || !isFluxModelRef(resolvedTrainingBaseModel)
+      || !isFluxModelRef(resolvedDestinationModel);
+    if (hasUnsupportedLegacyPersona) {
+      return NextResponse.json(
+        { error: 'Legacy personas are no longer supported. Retrain this persona with FLUX.' },
+        { status: 400 }
+      );
+    }
+    const prefersDirectHfUrl =
+      highQualityLoraModel.includes('flux-dev-lora')
+      || highQualityLoraModel.includes('flux-schnell-lora')
+      || String(process.env.REPLICATE_FLUX_LORA_MODEL || '').includes('flux-dev-lora');
+    const replicateReadyHfUrls = hfUrls.length > 0
+      ? await Promise.all(hfUrls.map((url, index) => prepareLoraUrlForReplicate(url, index, { preferDirectHfUrl: prefersDirectHfUrl })))
+      : [];
+    const trainingWeightIds = uniqStrings([
+      resolvedPersonaModelId,
+      ...personaPool.flatMap((p: any) => [p?.trainingId, p?.training_id, p?.modelId, p?.model_id]),
+    ]).filter((value) =>
+      Boolean(value)
+      && !String(value).includes('/')
+      && !String(value).includes(':')
+      && !/^https?:\/\//i.test(String(value))
+    );
+    const replicateTrainingWeightUrls = trainingWeightIds.length > 0
+      ? uniqStrings(await Promise.all(trainingWeightIds.map(async (id) => {
+          try {
+            const training = await replicate.trainings.get(String(id));
+            const output = (training?.output ?? {}) as Record<string, unknown>;
+            const rawWeightsUrl = String(
+              output?.weights_url
+              || output?.weights
+              || output?.weightsUrl
+              || output?.lora_weights_url
+              || output?.lora_weights
+              || output?.lora
+              || ''
+            ).trim();
+            if (!rawWeightsUrl) return '';
+            return rawWeightsUrl.includes('api.replicate.com/v1/files/')
+              ? await resolveReplicateFileUrl(rawWeightsUrl, process.env.REPLICATE_API_TOKEN || '')
+              : rawWeightsUrl;
+          } catch (error) {
+            console.warn('⚠️ Could not resolve Replicate training weights URL:', String((error as Error)?.message || error));
+            return '';
+          }
+        })))
+      : [];
+    const personaLoraUrls = replicateTrainingWeightUrls.length > 0
+      ? replicateTrainingWeightUrls
+      : replicateReadyHfUrls;
+    // Prefer the trained persona model/version for video reference-image generation.
+    // External LoRA endpoints remain as a fallback when no direct trained model is available.
+    const shouldPreferTrainedPersonaModel = Boolean(resolvedPersonaModelId || resolvedDestinationModel);
+    const shouldUseExternalLoraWeights =
+      personaLoraUrls.length > 0
+      && !shouldPreferTrainedPersonaModel;
     const triggerWords = uniqStrings([resolvedTriggerWord, ...personaPool.map((p: any) => p?.triggerWord || p?.trigger_word || '')]);
 
         /** Generate reference image. If sceneImagePrompt provided (from Gemini Phase 1), use it so the image matches the scene. Otherwise use rawPrompt + action/talk logic. */
@@ -1224,7 +1633,7 @@ export async function POST(req: Request) {
         return explicitUserRef;
       }
       const refWithoutPersona = personaImageUrl || personaUrl;
-      if (!resolvedPersonaModelId && refWithoutPersona) {
+      if (!resolvedPersonaModelId && !resolvedDestinationModel && hfUrls.length === 0 && refWithoutPersona) {
         console.log('✅ USING PERSONA/REF IMAGE (no model):', refWithoutPersona);
         return refWithoutPersona;
       }
@@ -1241,17 +1650,23 @@ export async function POST(req: Request) {
             : sceneImagePrompt!)
         : promptWithTrigger;
       const qualityPrefix = highQualityPrefix;
-      if (resolvedPersonaModelId) {
+      if (resolvedPersonaModelId || resolvedDestinationModel) {
         console.log('📸 [FLUX FIRST] Generating persona reference image' + (useScenePrompt ? ' (scene-tailored)' : '') + '...');
-        let targetModelVersion = resolvedPersonaModelId;
-        if (!resolvedPersonaModelId.includes('/') && !resolvedPersonaModelId.includes(':')) {
+        let targetModelVersion = resolvedPersonaModelId || resolvedDestinationModel;
+        if (resolvedPersonaModelId && !resolvedPersonaModelId.includes('/') && !resolvedPersonaModelId.includes(':')) {
           try {
             const training = await replicate.trainings.get(resolvedPersonaModelId);
             if (training.output?.version) targetModelVersion = training.output.version;
             else if (training.version) targetModelVersion = training.version;
           } catch {
             console.warn('ID resolve skipped');
+            if (resolvedDestinationModel) {
+              targetModelVersion = resolvedDestinationModel;
+            }
           }
+        }
+        if (!targetModelVersion) {
+          throw new Error('Persona is missing a trained model version.');
         }
         const shouldForceAction = Boolean(options?.forceActionFraming);
         const isAction =
@@ -1260,46 +1675,80 @@ export async function POST(req: Request) {
           || (useScenePrompt ? isActionLikePrompt(sceneImagePrompt || '') : false);
         const personaPrompt = useScenePrompt
           ? (isAction
-              ? buildFluxActionPrompt(`${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${baseForImage}`.trim(), { triggerWord: resolvedTriggerWord })
-              : `${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${baseForImage}`.trim())
+              ? `${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${personaActionAnchorPrefix} ${baseForImage}`.trim()
+              : `${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${personaAnchorPrefix} ${baseForImage}`.trim())
           : (isAction
-              ? buildFluxActionPrompt(`${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${promptWithTrigger}`.trim(), { triggerWord: resolvedTriggerWord })
-              : `${resolvedTriggerWord || 'TOK'}, wide angle, full body or face, cinematic, ${qualityPrefix} ${promptWithTrigger}`.trim());
+              ? `${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${personaActionAnchorPrefix} ${promptWithTrigger}`.trim()
+              : `${resolvedTriggerWord || 'TOK'}, ${qualityPrefix} ${personaAnchorPrefix} ${promptWithTrigger}`.trim());
         // If persona has Hugging Face LoRA(s), inject them into a LoRA-capable Flux endpoint.
-        if (hfUrls.length > 0) {
+        if (shouldUseExternalLoraWeights) {
+          if (personaLoraUrls.length === 1) {
+            console.log('🧪 HQ PERSONA IMAGE PATH [buildReferenceImageFirst]:', {
+              model: highQualityLoraModel,
+              steps: highQualityLoraSteps,
+              loraUrl: personaLoraUrls[0],
+            });
+            const hqOutput = await runReplicateWithRetry(highQualityLoraModel, {
+              lora_weights: personaLoraUrls[0],
+              prompt: ensurePromptHasTriggers(personaPrompt, triggerWords),
+              lora_scale: 1.0,
+              aspect_ratio: '16:9',
+              output_quality: 100,
+              output_format: 'png',
+              num_outputs: personaAnchorCandidateCount,
+              num_inference_steps: highQualityLoraSteps,
+              guidance_scale: Math.max(2.5, personaGuidanceScale),
+              go_fast: false,
+            });
+            const hqCandidates = uniqStrings([
+              cleanImageUrl,
+              extractImageUrl(hqOutput),
+              ...collectImageCandidateUrls(hqOutput),
+            ]).filter(Boolean);
+            cleanImageUrl = await selectBestPersonaAnchor(hqCandidates, {
+              userIntent: rawPrompt,
+              isAction,
+            });
+            if (!cleanImageUrl) {
+              throw new Error('HQ LoRA persona reference image generation failed.');
+            }
+            return cleanImageUrl;
+          }
           const model =
-            hfUrls.length > 1
+            personaLoraUrls.length > 1
               ? (process.env.REPLICATE_FLUX_MULTI_LORA_MODEL || 'lucataco/flux-dev-multi-lora')
               : (process.env.REPLICATE_FLUX_LORA_MODEL || 'black-forest-labs/flux-dev-lora');
           const loraPrompt = ensurePromptHasTriggers(personaPrompt, triggerWords);
           let loraOutput: any = null;
           try {
-            if (hfUrls.length > 1) {
+            if (personaLoraUrls.length > 1) {
               loraOutput = await runReplicateWithRetry(model, {
                 prompt: loraPrompt,
-                hf_loras: hfUrls,
+                hf_loras: personaLoraUrls,
                 aspect_ratio: '16:9',
                 output_quality: 100,
                 output_format: 'png',
-                num_inference_steps: 50,
+                num_inference_steps: fluxSafeInferenceSteps,
+                num_outputs: personaAnchorCandidateCount,
               });
             } else {
               loraOutput = await runReplicateWithRetry(model, {
                 prompt: loraPrompt,
-                lora_weights: hfUrls[0],
+                lora_weights: personaLoraUrls[0],
                 lora_scale: 1.0,
                 aspect_ratio: '16:9',
                 output_quality: 100,
                 output_format: 'png',
-                num_inference_steps: 50,
+                num_inference_steps: fluxSafeInferenceSteps,
+                num_outputs: personaAnchorCandidateCount,
               });
             }
           } catch (e: any) {
             // Fallback to minimal inputs if the model rejects optional fields.
-            if (hfUrls.length > 1) {
-              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, hf_loras: hfUrls });
+            if (personaLoraUrls.length > 1) {
+              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, hf_loras: personaLoraUrls });
             } else {
-              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 1.0 });
+              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, lora_weights: personaLoraUrls[0], lora_scale: 1.0 });
             }
           }
           const loraStream = findFirstStream(loraOutput);
@@ -1312,16 +1761,24 @@ export async function POST(req: Request) {
               console.warn('STREAM SAVE FAILED, URL fallback denenecek:', error);
             }
           }
-          if (!cleanImageUrl) cleanImageUrl = extractImageUrl(loraOutput);
+          const loraCandidates = uniqStrings([
+            cleanImageUrl,
+            extractImageUrl(loraOutput),
+            ...collectImageCandidateUrls(loraOutput),
+          ]).filter(Boolean);
+          cleanImageUrl = await selectBestPersonaAnchor(loraCandidates, {
+            userIntent: rawPrompt,
+            isAction,
+          });
           if (!cleanImageUrl) throw new Error('HF LoRA persona reference image generation failed.');
           return cleanImageUrl;
         }
         const personaImagePayload = {
           prompt: personaPrompt,
           aspect_ratio: '16:9',
-          num_outputs: 1,
-          num_inference_steps: 50,
-          guidance_scale: 3.5,
+          num_outputs: personaAnchorCandidateCount,
+          num_inference_steps: fluxSafeInferenceSteps,
+          guidance_scale: personaGuidanceScale,
           output_format: 'png',
           disable_safety_checker: true,
           lora_scale: 1.0,
@@ -1346,7 +1803,15 @@ export async function POST(req: Request) {
             console.warn('STREAM SAVE FAILED, URL fallback denenecek:', error);
           }
         }
-        if (!cleanImageUrl) cleanImageUrl = extractImageUrl(imageOutput);
+        const personaCandidates = uniqStrings([
+          cleanImageUrl,
+          extractImageUrl(imageOutput),
+          ...collectImageCandidateUrls(imageOutput),
+        ]).filter(Boolean);
+        cleanImageUrl = await selectBestPersonaAnchor(personaCandidates, {
+          userIntent: rawPrompt,
+          isAction,
+        });
         if (!cleanImageUrl) {
           const videoUrl = extractVideoUrl(imageOutput);
           if (videoUrl) {
@@ -1365,39 +1830,66 @@ export async function POST(req: Request) {
           || (useScenePrompt ? isActionLikePrompt(sceneImagePrompt || '') : false);
         const fluxPrompt = isAction ? buildFluxActionPrompt(basePrompt, { triggerWord: resolvedTriggerWord }) : basePrompt;
         // If HF LoRAs are selected (no trained model), use LoRA-capable endpoint instead of Flux 2 Max.
-        if (hfUrls.length > 0) {
+        if (shouldUseExternalLoraWeights) {
+          if (personaLoraUrls.length === 1) {
+            const hqOutput = await runReplicateWithRetry(highQualityLoraModel, {
+              lora_weights: personaLoraUrls[0],
+              prompt: ensurePromptHasTriggers(fluxPrompt, triggerWords),
+              lora_scale: 1.0,
+              aspect_ratio: '16:9',
+              output_quality: 100,
+              output_format: 'png',
+              num_outputs: personaAnchorCandidateCount,
+              num_inference_steps: highQualityLoraSteps,
+              guidance_scale: Math.max(2.5, personaGuidanceScale),
+              go_fast: false,
+            });
+            const hqCandidates = uniqStrings([
+              cleanImageUrl,
+              extractImageUrl(hqOutput),
+              ...collectImageCandidateUrls(hqOutput),
+            ]).filter(Boolean);
+            cleanImageUrl = await selectBestPersonaAnchor(hqCandidates, {
+              userIntent: rawPrompt,
+              isAction,
+            });
+            if (!cleanImageUrl) {
+              throw new Error('HQ LoRA reference image generation failed.');
+            }
+            return cleanImageUrl;
+          }
           const model =
-            hfUrls.length > 1
+            personaLoraUrls.length > 1
               ? (process.env.REPLICATE_FLUX_MULTI_LORA_MODEL || 'lucataco/flux-dev-multi-lora')
               : (process.env.REPLICATE_FLUX_LORA_MODEL || 'black-forest-labs/flux-dev-lora');
           const loraPrompt = ensurePromptHasTriggers(fluxPrompt, triggerWords);
           let loraOutput: any = null;
           try {
-            if (hfUrls.length > 1) {
+            if (personaLoraUrls.length > 1) {
               loraOutput = await runReplicateWithRetry(model, {
                 prompt: loraPrompt,
-                hf_loras: hfUrls,
+                hf_loras: personaLoraUrls,
                 aspect_ratio: '16:9',
                 output_quality: 100,
                 output_format: 'png',
-                num_inference_steps: 50,
+                num_inference_steps: fluxSafeInferenceSteps,
               });
             } else {
               loraOutput = await runReplicateWithRetry(model, {
                 prompt: loraPrompt,
-                lora_weights: hfUrls[0],
-                lora_scale: 0.95,
+                lora_weights: personaLoraUrls[0],
+                lora_scale: 1.0,
                 aspect_ratio: '16:9',
                 output_quality: 100,
                 output_format: 'png',
-                num_inference_steps: 50,
+                num_inference_steps: fluxSafeInferenceSteps,
               });
             }
           } catch (e: any) {
-            if (hfUrls.length > 1) {
-              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, hf_loras: hfUrls });
+            if (personaLoraUrls.length > 1) {
+              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, hf_loras: personaLoraUrls });
             } else {
-              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 0.95 });
+              loraOutput = await runReplicateWithRetry(model, { prompt: loraPrompt, lora_weights: personaLoraUrls[0], lora_scale: 1.0 });
             }
           }
           const loraStream = findFirstStream(loraOutput);
@@ -1419,7 +1911,7 @@ export async function POST(req: Request) {
           aspect_ratio: '16:9',
           output_quality: 100,
           output_format: 'png',
-          num_inference_steps: 50,
+          num_inference_steps: fluxSafeInferenceSteps,
         };
         let imageOutput: any = null;
         try {
@@ -1580,7 +2072,7 @@ JSON:
   "purpose_type": "FIGHT_WAR_ACTION | TALKING_CHAT_PODCAST | ADVERTISEMENT_PROMOTION | STORY_CINEMATIC | HERO_SHOT_ICONIC | THREAT_INTIMIDATION",
   "mode": "ACTION_MODE | TALKING_MODE",
   "is_fight_action": true | false,
-  "image_prompt": "Full scene-specific image prompt as a SINGLE frozen film still. [Persona]. [Camera/framing]. [Environment]. [Frozen pose capturing the user-requested motion as a decisive instant]. [Lighting]. [Style: photorealistic, 8k, cinematic${useVeo ? ', Zack Snyder style, IMAX 70mm, highly detailed CGI, dramatic cinematic lighting, high contrast, VFX destruction, volumetric smoke, dynamic camera' : ''}]. English. You MAY describe mid-action pose (e.g. mid-air dive) but DO NOT write multi-step motion sequences. Must look like the perfect starting frame for the described scene.",
+  "image_prompt": "Full scene-specific image prompt as a SINGLE frozen film still. [Persona]. [Camera/framing]. [Environment]. [Frozen pose capturing the user-requested motion as a decisive instant]. [Lighting]. [Style: photorealistic, 8k, cinematic${useVeo ? ', Zack Snyder style, IMAX 70mm, highly detailed CGI, dramatic cinematic lighting, high contrast, VFX destruction, volumetric smoke, dynamic camera' : ', Hollywood-level production design, exceptional environmental realism, premium color grading'}]. English. You MAY describe mid-action pose (e.g. mid-air dive) but DO NOT write multi-step motion sequences. Must look like the perfect starting frame for the described scene. ${isHumanPersonaSubject ? "The background must be highly detailed and cinematic but must not overpower the subject's face." : resolvedPersonaSubjectType === 'animal' ? 'The environment must support the animal without overpowering its anatomy, fur pattern, markings, or silhouette.' : resolvedPersonaSubjectType === 'product' ? 'The environment must support the product without overpowering its silhouette, logo placement, or material details.' : 'The environment must support the subject without overpowering its defining silhouette, markings, texture, or proportions.'}",
   "voice_category": "male_villain | male_heroic | ...",
   "speech_text": "...",
   "sfx_prompt": "...",
@@ -1624,6 +2116,34 @@ JSON:
             usedGeminiImagePrompt = true;
             imagePrompt = phase1ImagePrompt;
           }
+        }
+
+        const shouldDryRun = dryRun === true || dryRun === 'true' || dryRun === 1 || dryRun === '1';
+        console.log('🧪 DRY RUN:', shouldDryRun, 'raw:', dryRun);
+        if (shouldDryRun) {
+          const plannedReferenceModel =
+            shouldUseExternalLoraWeights
+              ? highQualityLoraModel
+              : (resolvedDestinationModel || resolvedPersonaModelId || 'black-forest-labs/flux-2-max');
+          return NextResponse.json({
+            success: true,
+            dryRun: true,
+            qualityPreset,
+            imagePrompt,
+            videoPrompt,
+            usedGeminiImagePrompt,
+            usedGeminiVideoPrompt,
+            audioCategory: audioContentType,
+            audioText: audioTextContent,
+            audioScript,
+            sfxPrompt: sfxPromptText,
+            avatarPerformance,
+            voiceEmotion,
+            voiceEmotionSettings,
+            plannedPersonaModelFamily: 'flux-lora',
+            plannedReferenceModel,
+            plannedReferenceSteps: highQualityLoraSteps,
+          });
         }
 
         if (personaActive) {
@@ -1812,28 +2332,13 @@ Prompt: "${videoPrompt}"
     if (imagePrompt && !imagePrompt.toLowerCase().includes('arri alexa lf')) {
       imagePrompt = `${imagePrompt}${CINEMATIC_VISUAL_SUFFIX}`;
     }
-    const visualPrompt = `${imagePrompt || originalPrompt}, 8k, action movie aesthetic`;
-
-    const shouldDryRun = dryRun === true || dryRun === 'true' || dryRun === 1 || dryRun === '1';
-    console.log('🧪 DRY RUN:', shouldDryRun, 'raw:', dryRun);
-
-    if (shouldDryRun) {
-      return NextResponse.json({
-        success: true,
-        dryRun: true,
-        imagePrompt,
-        videoPrompt,
-        usedGeminiImagePrompt,
-        usedGeminiVideoPrompt,
-        audioCategory: audioContentType,
-        audioText: audioTextContent,
-        audioScript,
-        sfxPrompt: sfxPromptText,
-        avatarPerformance,
-        voiceEmotion,
-        voiceEmotionSettings,
-      });
+    if (personaActive) {
+      const lowerVideoPrompt = videoPrompt.toLowerCase();
+      if (!lowerVideoPrompt.includes('exact same face identity') && !lowerVideoPrompt.includes('identity drift')) {
+        videoPrompt = `${videoPrompt} ${personaIdentityVideoRule}`.trim();
+      }
     }
+    const visualPrompt = `${imagePrompt || originalPrompt}, 8k, action movie aesthetic`;
 
     // No persona: for Grok/Veo we can send the prompt directly without generating an anchor image.
     // Skip when user chose Kling (video or avatar): Kling video needs an anchor; Kling avatar needs image+audio.
@@ -1852,15 +2357,33 @@ Prompt: "${videoPrompt}"
         if (!xaiKey) {
           throw new Error('XAI_API_KEY is missing. Grok engine requires xAI API key (no Replicate fallback).');
         }
-        const xai = await generateXaiVideo({
-          prompt: promptOnly,
-          duration: durationSec,
-          aspectRatio: '16:9',
-          resolution: (process.env.XAI_VIDEO_RESOLUTION || '480p') as any,
-          model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
-          timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
-          pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
-        });
+        let xai: Awaited<ReturnType<typeof generateXaiVideo>>;
+        try {
+          xai = await generateXaiVideo({
+            prompt: promptOnly,
+            duration: durationSec,
+            aspectRatio: '16:9',
+            resolution: preferredXaiResolution as any,
+            model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
+            timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
+            pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
+          });
+        } catch (error) {
+          if (preferredXaiResolution !== '480p') {
+            console.warn('Grok resolution fallback to 480p after failure:', (error as Error)?.message || error);
+            xai = await generateXaiVideo({
+              prompt: promptOnly,
+              duration: durationSec,
+              aspectRatio: '16:9',
+              resolution: '480p' as any,
+              model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
+              timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
+              pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
+            });
+          } else {
+            throw error;
+          }
+        }
         grokVideoUrl = xai.url;
         engineUsed = `xai/${xai.model}`;
 
@@ -2055,16 +2578,16 @@ Prompt: "${videoPrompt}"
       if (explicitUserRef) {
         return explicitUserRef;
       }
-      if (!resolvedPersonaModelId && (personaImageUrl || personaUrl)) {
+      if (!resolvedPersonaModelId && !resolvedDestinationModel && hfUrls.length === 0 && (personaImageUrl || personaUrl)) {
         const fallback = personaImageUrl || personaUrl;
         console.log('✅ USING PERSONA/REF IMAGE (no model):', fallback);
         return fallback;
       }
       let cleanImageUrl = '';
 
-      if (resolvedPersonaModelId) {
+      if (resolvedPersonaModelId || resolvedDestinationModel || hfUrls.length > 0) {
         console.log('👤 PERSONA SEÇİLİ: Önce persona ile referans görsel üretiliyor, sonra video bu görsele göre yapılacak.');
-        let targetModelVersion = resolvedPersonaModelId;
+        let targetModelVersion = resolvedPersonaModelId || resolvedDestinationModel;
         if (resolvedPersonaModelId && !resolvedPersonaModelId.includes('/') && !resolvedPersonaModelId.includes(':')) {
           try {
             const training = await replicate.trainings.get(resolvedPersonaModelId);
@@ -2072,21 +2595,105 @@ Prompt: "${videoPrompt}"
             else if (training.version) targetModelVersion = training.version;
           } catch {
             console.warn('ID resolve skipped');
+            if (resolvedDestinationModel) {
+              targetModelVersion = resolvedDestinationModel;
+            }
           }
+        }
+        if (!targetModelVersion) {
+          throw new Error('Persona is missing a trained model version.');
         }
 
         console.log('📸 GENERATING PERSONA REFERENCE IMAGE...');
         const isActionOrFight = intentMode === 'ACTION_MODE' || isFightAction;
         const personaVisibilityPrefix = isActionOrFight
-          ? 'wide angle, full body shot, dynamic combat framing, environmental interaction,'
-          : 'distinct facial features visible, recognizable identity, cinematic shot revealing the face,';
+          ? personaActionAnchorPrefix
+          : personaAnchorPrefix;
         const personaPrompt = `${resolvedTriggerWord || 'TOK'}, ${personaVisibilityPrefix} ${highQualityPrefix} ${visualPrompt}`.trim();
+        if (shouldUseExternalLoraWeights) {
+          if (personaLoraUrls.length === 1) {
+            console.log('🧪 HQ PERSONA IMAGE PATH [buildReferenceImage]:', {
+              model: highQualityLoraModel,
+              steps: highQualityLoraSteps,
+              loraUrl: personaLoraUrls[0],
+            });
+            const hqOutput = await runReplicateWithRetry(highQualityLoraModel, {
+              lora_weights: personaLoraUrls[0],
+              prompt: ensurePromptHasTriggers(personaPrompt, triggerWords),
+              lora_scale: 1.0,
+              aspect_ratio: '16:9',
+              output_quality: 100,
+              output_format: 'png',
+              num_outputs: personaAnchorCandidateCount,
+              num_inference_steps: highQualityLoraSteps,
+              guidance_scale: Math.max(2.5, personaGuidanceScale),
+              go_fast: false,
+            });
+            const hqCandidates = uniqStrings([
+              cleanImageUrl,
+              extractImageUrl(hqOutput),
+              ...collectImageCandidateUrls(hqOutput),
+            ]).filter(Boolean);
+            cleanImageUrl = await selectBestPersonaAnchor(hqCandidates, {
+              userIntent: visualPrompt,
+              isAction: isActionOrFight,
+            });
+            if (!cleanImageUrl) {
+              throw new Error('HQ LoRA persona reference image generation failed.');
+            }
+          } else {
+            const model = process.env.REPLICATE_FLUX_MULTI_LORA_MODEL || 'lucataco/flux-dev-multi-lora';
+            const loraPrompt = ensurePromptHasTriggers(personaPrompt, triggerWords);
+            let loraOutput: any = null;
+            try {
+              loraOutput = await runReplicateWithRetry(model, {
+                prompt: loraPrompt,
+                hf_loras: personaLoraUrls,
+                aspect_ratio: '16:9',
+                output_quality: 100,
+                output_format: 'png',
+                num_inference_steps: fluxSafeInferenceSteps,
+                num_outputs: personaAnchorCandidateCount,
+              });
+            } catch {
+              loraOutput = await runReplicateWithRetry(model, {
+                prompt: loraPrompt,
+                hf_loras: personaLoraUrls,
+              });
+            }
+            const loraStream = findFirstStream(loraOutput);
+            if (loraStream) {
+              try {
+                const streamBuffer = Buffer.from(await new Response(loraStream).arrayBuffer());
+                cleanImageUrl = await saveBufferToPublic(streamBuffer, 'png');
+                console.log('🧪 STREAM OUTPUT SAVED TO /generated:', cleanImageUrl);
+              } catch (error) {
+                console.warn('STREAM SAVE FAILED, URL fallback denenecek:', error);
+              }
+            }
+            const loraCandidates = uniqStrings([
+              cleanImageUrl,
+              extractImageUrl(loraOutput),
+              ...collectImageCandidateUrls(loraOutput),
+            ]).filter(Boolean);
+            cleanImageUrl = await selectBestPersonaAnchor(loraCandidates, {
+              userIntent: visualPrompt,
+              isAction: isActionOrFight,
+            });
+            if (!cleanImageUrl) {
+              throw new Error('HF LoRA persona reference image generation failed.');
+            }
+          }
+          console.log('✅ VALID PERSONA IMAGE URL EXTRACTED:', cleanImageUrl);
+          cleanImageUrl = await restoreFace(cleanImageUrl);
+          return cleanImageUrl;
+        }
         const personaImagePayload = {
           prompt: personaPrompt,
           aspect_ratio: '16:9',
-          num_outputs: 1,
-          num_inference_steps: 50,
-          guidance_scale: 3.5,
+          num_outputs: personaAnchorCandidateCount,
+          num_inference_steps: fluxSafeInferenceSteps,
+          guidance_scale: personaGuidanceScale,
           output_format: 'png',
           disable_safety_checker: true,
           lora_scale: 0.95,
@@ -2119,7 +2726,15 @@ Prompt: "${videoPrompt}"
             console.warn('STREAM SAVE FAILED, URL fallback denenecek:', error);
           }
         }
-        if (!cleanImageUrl) cleanImageUrl = extractImageUrl(imageOutput);
+        const personaCandidates = uniqStrings([
+          cleanImageUrl,
+          extractImageUrl(imageOutput),
+          ...collectImageCandidateUrls(imageOutput),
+        ]).filter(Boolean);
+        cleanImageUrl = await selectBestPersonaAnchor(personaCandidates, {
+          userIntent: visualPrompt,
+          isAction: isActionOrFight,
+        });
         if (!cleanImageUrl) {
           const videoUrl = extractVideoUrl(imageOutput);
           if (videoUrl) {
@@ -2147,7 +2762,7 @@ Prompt: "${videoPrompt}"
           aspect_ratio: '16:9',
           output_quality: 100,
           output_format: 'png',
-          num_inference_steps: 50,
+          num_inference_steps: fluxSafeInferenceSteps,
         };
 
         let imageOutput: any = null;
@@ -2283,8 +2898,29 @@ Prompt: "${videoPrompt}"
               const buf = await readFile(path.join(process.cwd(), 'public', cleanImageUrl));
               return `data:image/jpeg;base64,${buf.toString('base64')}`;
             }
+            
+            // If it's a localhost URL, try to read it from the local file system
+            if (imageAbsolute && (imageAbsolute.includes('localhost') || imageAbsolute.includes('127.0.0.1'))) {
+              try {
+                const urlObj = new URL(imageAbsolute);
+                if (urlObj.pathname.startsWith('/generated/')) {
+                  const { readFile } = await import('node:fs/promises');
+                  const buf = await readFile(path.join(process.cwd(), 'public', urlObj.pathname));
+                  return `data:image/jpeg;base64,${buf.toString('base64')}`;
+                }
+              } catch (e) {
+                console.warn('Failed to read localhost URL as local file:', e);
+              }
+            }
+            
             const urlToFetch = imageAbsolute && imageAbsolute.startsWith('http') ? imageAbsolute : null;
             if (!urlToFetch) return null;
+            
+            // Don't try to fetch localhost URLs directly
+            if (urlToFetch.includes('localhost') || urlToFetch.includes('127.0.0.1')) {
+              throw new Error(`Cannot fetch localhost URL directly: ${urlToFetch}`);
+            }
+            
             const media = await downloadMediaWithValidation(urlToFetch, {
               token: process.env.REPLICATE_API_TOKEN || '',
               expectedKind: 'image',
@@ -2296,7 +2932,8 @@ Prompt: "${videoPrompt}"
             });
             const mime = media.contentType || 'image/jpeg';
             return `data:${mime};base64,${media.buffer.toString('base64')}`;
-          } catch {
+          } catch (e) {
+            console.warn('Failed to get reference image as data URI:', e);
             return null;
           }
         };
@@ -2308,16 +2945,35 @@ Prompt: "${videoPrompt}"
         let grokVideoUrl = '';
         let engineUsed = 'xai/grok-imagine-video';
 
-        const xai = await generateXaiVideo({
-          prompt: actionPrompt,
-          imageUrl: grokImageInput,
-          duration: durationSec,
-          aspectRatio: '16:9',
-          resolution: (process.env.XAI_VIDEO_RESOLUTION || '480p') as any,
-          model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
-          timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
-          pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
-        });
+        let xai: Awaited<ReturnType<typeof generateXaiVideo>>;
+        try {
+          xai = await generateXaiVideo({
+            prompt: actionPrompt,
+            imageUrl: grokImageInput,
+            duration: durationSec,
+            aspectRatio: '16:9',
+            resolution: preferredXaiResolution as any,
+            model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
+            timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
+            pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
+          });
+        } catch (error) {
+          if (preferredXaiResolution !== '480p') {
+            console.warn('Grok resolution fallback to 480p after failure:', (error as Error)?.message || error);
+            xai = await generateXaiVideo({
+              prompt: actionPrompt,
+              imageUrl: grokImageInput,
+              duration: durationSec,
+              aspectRatio: '16:9',
+              resolution: '480p' as any,
+              model: (process.env.XAI_VIDEO_MODEL || 'grok-imagine-video') as any,
+              timeoutMs: Number(process.env.XAI_VIDEO_TIMEOUT_MS || '') || undefined,
+              pollIntervalMs: Number(process.env.XAI_VIDEO_POLL_MS || '') || undefined,
+            });
+          } else {
+            throw error;
+          }
+        }
         grokVideoUrl = xai.url;
         engineUsed = `xai/${xai.model}`;
         if (!grokVideoUrl || typeof grokVideoUrl !== 'string') {
@@ -2514,21 +3170,16 @@ Prompt: "${videoPrompt}"
 
     if (useRunway) {
       // Runway is async-first: create task and return task id immediately (never wait for completion).
-      cleanImageUrl = referenceImageUrl || (await buildReferenceImage());
+      if (!personaActive && !explicitReferenceImage) {
+        throw new Error('Runway image-to-video icin referans gorsel gerekli. Persona sec veya source/reference image yukle; aksi halde Grok/Veo kullan.');
+      }
+      cleanImageUrl = referenceImageUrl || explicitReferenceImage || (personaActive ? (await buildReferenceImage()) : '');
       if (!cleanImageUrl || typeof cleanImageUrl !== 'string' || !cleanImageUrl.trim()) {
         throw new Error('Referans görsel gerekli: Runway için önce bir başlangıç karesi üretilmeli.');
       }
 
-      // Ensure Runway can fetch the prompt image (must be public https/data/runway://). Convert local/Replicate-auth URLs.
-      const promptImage = await ensurePublicAssetUrl(
-        { url: cleanImageUrl },
-        {
-          token: process.env.REPLICATE_API_TOKEN || '',
-          resolveAbsoluteUrl: ensureAbsoluteUrl,
-          bypassReplicateFileApi: false,
-          logger: { info: (...a: unknown[]) => console.log(...a), warn: (...a: unknown[]) => console.warn(...a) },
-        }
-      );
+      // Ensure Runway can fetch the prompt image (public https/data URL). If storage is unavailable, use data URL fallback.
+      const promptImage = await ensureRunwayPromptImage(cleanImageUrl);
 
       const runwayPrompt = String(videoPrompt || imagePrompt || safeUserIdea || '').trim();
       if (!runwayPrompt) {
@@ -2540,7 +3191,7 @@ Prompt: "${videoPrompt}"
         model: runwayModel,
         promptImage,
         promptText: runwayPrompt,
-        ratio: '1280:720',
+        ratio: qualityRuntime.runwayRatio,
         duration: durationSec,
       });
 
@@ -2561,7 +3212,10 @@ Prompt: "${videoPrompt}"
 
     if (useKlingVideo && klingVideoModelKey) {
       // Kling Video (I2V): always anchor-frame -> Kling video model with Replicate->Fal fallback.
-      cleanImageUrl = referenceImageUrl || (await buildReferenceImage());
+      if (!personaActive && !explicitReferenceImage) {
+        throw new Error('Kling image-to-video icin referans gorsel gerekli. Persona sec veya source/reference image yukle; aksi halde Grok/Veo kullan.');
+      }
+      cleanImageUrl = referenceImageUrl || explicitReferenceImage || (personaActive ? (await buildReferenceImage()) : '');
       if (!cleanImageUrl || typeof cleanImageUrl !== 'string' || !cleanImageUrl.trim()) {
         throw new Error('Referans görsel gerekli: Kling Video için önce bir başlangıç karesi üretilmeli.');
       }
@@ -2646,7 +3300,10 @@ Prompt: "${videoPrompt}"
       if (!audioScript) {
         throw new Error('Kling Avatar (Lip-Sync) requires dialogue/speech text. Add script or select another engine.');
       }
-      cleanImageUrl = referenceImageUrl || (await buildReferenceImage());
+      if (!personaActive && !explicitReferenceImage) {
+        throw new Error('Kling Avatar icin referans portre gerekli. Persona sec veya source/reference image yukle.');
+      }
+      cleanImageUrl = referenceImageUrl || explicitReferenceImage || (personaActive ? (await buildReferenceImage()) : '');
       if (!cleanImageUrl || typeof cleanImageUrl !== 'string' || !cleanImageUrl.trim()) {
         throw new Error('Referans görsel gerekli: Persona/Flux görseli video motoruna (Kling) verilmeden önce üretilmeli.');
       }
@@ -2782,9 +3439,17 @@ Prompt: "${videoPrompt}"
     }
     throw new Error('No engine path matched. Ensure engine is one of: grok, kling, veo.');
   } catch (error: any) {
+    if (error instanceof AdmissionError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code, retryAfterMs: error.retryAfterMs },
+        { status: 429 }
+      );
+    }
     console.error('❌ GENERATION ERROR:', error);
     const msg = String(error?.message || 'Unknown error');
     const isMissingXaiKey = msg.toLowerCase().includes('xai_api_key') && msg.toLowerCase().includes('missing');
     return NextResponse.json({ error: msg }, { status: isMissingXaiKey ? 400 : 500 });
+  } finally {
+    releaseAdmission?.();
   }
 }

@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
-import { getJob } from '@/lib/async-video-jobs';
+import { getJob, setJob } from '@/lib/async-video-jobs';
 import { fal } from '@fal-ai/client';
 import { extractFirstOutputUrl, getRunwayTask, normalizeRunwayTaskStatus } from '@/lib/runway';
-import { downloadMediaWithValidation } from '@/lib/replicate-media';
-import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
+import { storeRunwayVideoBestEffort } from '@/lib/runway-video-storage';
 
 export async function GET(request: NextRequest) {
   try {
@@ -39,16 +38,7 @@ export async function GET(request: NextRequest) {
           });
         }
         // Best-effort: persist to our storage so URL won't expire.
-        let storedUrl = outputUrl;
-        try {
-          const media = await downloadMediaWithValidation(outputUrl, { expectedKind: 'video', strictExpectedKind: true });
-          const provider = getStorageProvider();
-          const key = makeStorageObjectKey('generated/runway', media.contentType || 'video/mp4', 'runway.mp4');
-          await provider.upload(media.buffer, media.contentType || 'video/mp4', key);
-          storedUrl = await provider.getSignedUrl(key, 60 * 60 * 24);
-        } catch (err) {
-          console.warn('Runway store failed; returning ephemeral URL.', (err as any)?.message || err);
-        }
+        const storedUrl = await storeRunwayVideoBestEffort(outputUrl);
         return NextResponse.json({
           status: 'succeeded',
           progress: 1,
@@ -80,22 +70,12 @@ export async function GET(request: NextRequest) {
 
     // Async job (job_xxx): in-memory store from generate-video when body.async === true
     if (videoId.startsWith('job_')) {
-      const job = getJob(videoId);
+      const job = await getJob(videoId);
       if (!job) {
         return NextResponse.json({
           status: 'starting',
           progress: 0,
           statusMessage: 'Job not found or expired.',
-          error: null,
-          videoUrl: null,
-          output: null,
-        });
-      }
-      if (job.status === 'pending') {
-        return NextResponse.json({
-          status: 'processing',
-          progress: 0.5,
-          statusMessage: 'Generating video...',
           error: null,
           videoUrl: null,
           output: null,
@@ -111,8 +91,111 @@ export async function GET(request: NextRequest) {
           output: null,
         });
       }
-      const result = job.result || {};
-      const videoUrl = (result as { videoUrl?: string }).videoUrl ?? null;
+
+      const result = (job.result || {}) as Record<string, unknown>;
+      const storedVideoUrl =
+        typeof result.videoUrl === 'string' && result.videoUrl.trim()
+          ? result.videoUrl.trim()
+          : null;
+      const nestedVideoId =
+        typeof result.videoId === 'string' && result.videoId.trim()
+          ? result.videoId.trim()
+          : '';
+
+      if (!storedVideoUrl && nestedVideoId && nestedVideoId !== videoId && !nestedVideoId.startsWith('job_')) {
+        const nestedStatusUrl = new URL(request.url);
+        nestedStatusUrl.searchParams.set('id', nestedVideoId);
+
+        const nestedResponse = await fetch(nestedStatusUrl.toString(), { cache: 'no-store' });
+        const nestedData = await nestedResponse.json().catch(() => ({}));
+
+        if (nestedResponse.ok && nestedData?.status === 'succeeded' && nestedData?.videoUrl) {
+          const mergedResult = {
+            ...result,
+            ...nestedData,
+            videoId: nestedVideoId,
+            videoUrl: String(nestedData.videoUrl),
+          };
+          await setJob(videoId, {
+            status: 'succeeded',
+            result: mergedResult,
+            userId: job.userId,
+            createdAt: job.createdAt,
+          });
+          return NextResponse.json({
+            status: 'succeeded',
+            progress: 1,
+            statusMessage: nestedData.statusMessage || 'Video generation complete!',
+            error: null,
+            videoUrl: String(nestedData.videoUrl),
+            output: mergedResult,
+            audioMerged: Boolean(nestedData.audioMerged || (mergedResult as { audioMerged?: boolean }).audioMerged),
+          });
+        }
+
+        if (
+          nestedResponse.ok
+          && (nestedData?.status === 'failed' || nestedData?.status === 'canceled' || nestedData?.status === 'error')
+        ) {
+          const message = String(nestedData?.error || nestedData?.statusMessage || 'Generation failed');
+          await setJob(videoId, {
+            status: 'failed',
+            error: message,
+            result: {
+              ...result,
+              nestedStatus: nestedData,
+            },
+            userId: job.userId,
+            createdAt: job.createdAt,
+          });
+          return NextResponse.json({
+            status: 'failed',
+            progress: 0,
+            statusMessage: message,
+            error: message,
+            videoUrl: null,
+            output: {
+              ...result,
+              nestedStatus: nestedData,
+            },
+          });
+        }
+
+        return NextResponse.json({
+          status: 'processing',
+          progress: typeof nestedData?.progress === 'number' ? nestedData.progress : 0.5,
+          statusMessage: nestedData?.statusMessage || 'Generating video...',
+          error: null,
+          videoUrl: null,
+          output: {
+            ...result,
+            nestedStatus: nestedData || null,
+          },
+        });
+      }
+
+      if (job.status === 'pending' && !storedVideoUrl) {
+        return NextResponse.json({
+          status: 'processing',
+          progress: 0.5,
+          statusMessage: 'Generating video...',
+          error: null,
+          videoUrl: null,
+          output: result,
+        });
+      }
+
+      const videoUrl = storedVideoUrl;
+      if (!videoUrl) {
+        return NextResponse.json({
+          status: 'processing',
+          progress: 0.5,
+          statusMessage: 'Generating video...',
+          error: null,
+          videoUrl: null,
+          output: result,
+        });
+      }
       return NextResponse.json({
         status: 'succeeded',
         progress: 1,

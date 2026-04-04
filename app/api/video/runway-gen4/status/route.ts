@@ -1,29 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { downloadMediaWithValidation } from '@/lib/replicate-media';
-import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
 import { extractFirstOutputUrl, getRunwayTask, normalizeRunwayTaskStatus } from '@/lib/runway';
+import { storeRunwayVideoBestEffort } from '@/lib/runway-video-storage';
 
 export const runtime = 'nodejs';
-
-const storeVideoBestEffort = async (url: string): Promise<string> => {
-  try {
-    const media = await downloadMediaWithValidation(url, {
-      expectedKind: 'video',
-      strictExpectedKind: true,
-      logger: {
-        info: (...args) => console.log(...args),
-        warn: (...args) => console.warn(...args),
-      },
-    });
-    const provider = getStorageProvider();
-    const key = makeStorageObjectKey('generated/runway', media.contentType || 'video/mp4', 'runway.mp4');
-    await provider.upload(media.buffer, media.contentType || 'video/mp4', key);
-    return await provider.getSignedUrl(key, 60 * 60 * 24);
-  } catch (error) {
-    console.warn('Runway output store failed; falling back to ephemeral URL.', (error as any)?.message || error);
-    return url;
-  }
-};
 
 export async function GET(request: NextRequest) {
   try {
@@ -58,7 +37,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const storedUrl = await storeVideoBestEffort(outputUrl);
+    const storedUrl = await storeRunwayVideoBestEffort(outputUrl);
     return NextResponse.json({
       success: true,
       task_id: taskId,

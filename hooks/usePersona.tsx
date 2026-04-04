@@ -6,7 +6,7 @@ import type { User } from '@/lib/subscription';
 import { canTrainVisualPersona, canTrainVoicePersona, isPremiumUser } from '@/lib/subscription';
 
 export type PersonaStatus = 'none' | 'training' | 'ready';
-export type PersonaTrainingStatus = 'training' | 'completed' | 'failed';
+export type PersonaTrainingStatus = 'training' | 'completed' | 'failed' | 'canceled';
 
 export type Persona = {
   id: string;
@@ -24,7 +24,7 @@ export type Persona = {
 
 type PersonaRequestResult = {
   ok: boolean;
-  reason?: 'premium_required' | 'requires_20_photos' | 'requires_voice_samples';
+  reason?: 'premium_required' | 'requires_training_images' | 'requires_voice_samples';
   personaId?: string;
 };
 
@@ -109,8 +109,8 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
     if (!canTrainVisualPersona(user)) {
       return { ok: false, reason: 'premium_required' };
     }
-    if (photoCount !== 20) {
-      return { ok: false, reason: 'requires_20_photos' };
+    if (photoCount < 4) {
+      return { ok: false, reason: 'requires_training_images' };
     }
     let createdId: string | undefined;
     setPersona(prev => {
@@ -172,7 +172,12 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
       return {
         ...prev,
         status,
-        visualStatus: status === 'completed' ? 'ready' : prev.visualStatus,
+        visualStatus:
+          status === 'completed'
+            ? 'ready'
+            : status === 'failed' || status === 'canceled'
+              ? 'none'
+              : prev.visualStatus,
         ...(updates ?? {}),
       };
     });

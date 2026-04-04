@@ -5,7 +5,9 @@ import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 import { downloadMediaWithValidation } from '@/lib/replicate-media';
 import { resolveReplicateDownloadUrl } from '@/lib/replicate-media';
 import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
+import { normalizePersonaSubjectType } from '@/lib/persona-subject';
 import HuggingFaceService from '@/lib/huggingface-service';
+import { normalizeLoraWeightsBuffer } from '@/lib/lora-weights';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -36,6 +38,40 @@ const isProbablySafetensorsPath = (value: string) =>
 
 const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 const isGender = (value: unknown): value is 'male' | 'female' => value === 'male' || value === 'female';
+const isModelFamily = (value: unknown): value is 'flux-lora' =>
+  value === 'flux-lora';
+const isFluxModelRef = (value: unknown) => {
+  const normalized = safeTrim(value).toLowerCase();
+  return !normalized || normalized.includes('flux');
+};
+const isUnsupportedLegacyPersona = (value: any) => {
+  const modelFamily = safeTrim(value?.modelFamily ?? value?.model_family).toLowerCase();
+  const trainingBaseModel = safeTrim(value?.trainingBaseModel ?? value?.training_base_model).toLowerCase();
+  const destinationModel = safeTrim(value?.destinationModel ?? value?.destination_model).toLowerCase();
+  return (modelFamily && modelFamily !== 'flux-lora')
+    || !isFluxModelRef(trainingBaseModel)
+    || !isFluxModelRef(destinationModel);
+};
+
+const normalizeReferenceImages = (
+  value: unknown
+): NonNullable<PersonaRecord['referenceImages']> => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): NonNullable<PersonaRecord['referenceImages']>[number] | null => {
+      if (!item || typeof item !== 'object') return null;
+      const url = safeTrim((item as any).url);
+      if (!url) return null;
+      const storagePath = safeTrim((item as any).storagePath || (item as any).storage_path) || undefined;
+      const name = safeTrim((item as any).name || (item as any).fileName || (item as any).file_name) || undefined;
+      return {
+        url,
+        ...(storagePath ? { storagePath } : {}),
+        ...(name ? { name } : {}),
+      };
+    })
+    .filter((item): item is NonNullable<PersonaRecord['referenceImages']>[number] => Boolean(item));
+};
 
 const resolveWeightsSource = (personaData: any) => {
   const weightsUrl =
@@ -122,7 +158,9 @@ export async function POST(request: NextRequest) {
     // - Replicate file URLs (https://api.replicate.com/v1/files/...)
     // - Public HTTP(S) URLs to .safetensors
     // - Local server file paths to .safetensors
-    let { weightsUrl: weightsUrlInput, localWeightsPath } = resolveWeightsSource(personaData);
+    const resolvedWeightsSource = resolveWeightsSource(personaData);
+    const { localWeightsPath } = resolvedWeightsSource;
+    let { weightsUrl: weightsUrlInput } = resolvedWeightsSource;
     const existingHuggingFaceUrl = safeTrim(personaData?.huggingFaceUrl) || safeTrim(personaData?.huggingface_url);
 
     // If caller didn't provide a direct weights URL but we have a Replicate training id, try to resolve weights_url.
@@ -154,11 +192,16 @@ export async function POST(request: NextRequest) {
             warn: (...args) => console.warn(...args),
           },
         });
-        const ext = isProbablySafetensorsPath(weightsUrlInput)
-          ? 'safetensors'
-          : 'safetensors';
+        const normalizedWeights = normalizeLoraWeightsBuffer(media.buffer, weightsUrlInput);
+        if (normalizedWeights.kind !== 'safetensors') {
+          return NextResponse.json(
+            { error: 'LoRA weights are not a valid safetensors file.', code: 'LORA_FORMAT_INVALID' },
+            { status: 400 }
+          );
+        }
+        const ext = normalizedWeights.extension;
         tempWeightsPath = path.join(os.tmpdir(), `lora-${personaData.personaId}-${Date.now()}.${ext}`);
-        await fs.writeFile(tempWeightsPath, media.buffer);
+        await fs.writeFile(tempWeightsPath, normalizedWeights.buffer);
         uploadPath = tempWeightsPath;
       }
 
@@ -202,6 +245,12 @@ export async function POST(request: NextRequest) {
       : typeof personaData.imageUrl === 'string'
         ? personaData.imageUrl.trim()
         : '';
+    const resolvedSubjectType = normalizePersonaSubjectType(
+      personaData.subjectType ?? personaData.subject_type
+    );
+    const referenceImages = normalizeReferenceImages(
+      personaData.referenceImages ?? personaData.reference_images
+    );
     let storagePath = typeof personaData.storage_path === 'string'
       ? personaData.storage_path.trim()
       : typeof personaData.storagePath === 'string'
@@ -258,18 +307,39 @@ export async function POST(request: NextRequest) {
       userId: userCheck.userId,
       name: personaData.name,
       triggerWord: personaData.triggerWord,
-      gender: isGender(personaData.gender) ? personaData.gender : (isGender(personaData?.persona_gender) ? personaData.persona_gender : undefined),
+      gender:
+        resolvedSubjectType === 'human'
+          ? (isGender(personaData.gender) ? personaData.gender : (isGender(personaData?.persona_gender) ? personaData.persona_gender : undefined))
+          : undefined,
+      subjectType: resolvedSubjectType,
       modelId: personaData.modelId,
       trainingId: personaData.trainingId,
       createdAt: personaData.createdAt,
       imageCount: personaData.imageCount,
       imageUrl: persistedImageUrl || undefined,
       storagePath: storagePath || undefined,
+      ...(referenceImages.length > 0 ? { referenceImages } : {}),
+      ...(referenceImages.length > 0
+        ? { referenceImageCount: referenceImages.length }
+        : typeof personaData.referenceImageCount === 'number'
+          ? { referenceImageCount: personaData.referenceImageCount }
+          : typeof personaData.reference_image_count === 'number'
+            ? { referenceImageCount: personaData.reference_image_count }
+            : {}),
       status: personaData.status ?? 'training',
       visualStatus: personaData.visualStatus ?? 'ready',
       // Persist HF URL in both fields for compatibility.
       huggingFaceUrl: huggingFaceUrlToPersist || undefined,
       weightsUrl: huggingFaceUrlToPersist || personaData.weightsUrl || personaData.weights_url || undefined,
+      ...(safeTrim(personaData.destinationModel || personaData.destination_model)
+        ? { destinationModel: safeTrim(personaData.destinationModel || personaData.destination_model) }
+        : {}),
+      ...(safeTrim(personaData.trainingBaseModel || personaData.training_base_model)
+        ? { trainingBaseModel: safeTrim(personaData.trainingBaseModel || personaData.training_base_model) }
+        : {}),
+      ...(isModelFamily(personaData.modelFamily) || isModelFamily(personaData.model_family)
+        ? { modelFamily: (personaData.modelFamily || personaData.model_family) as 'flux-lora' }
+        : {}),
     };
 
     await upsertPersona(record);
@@ -343,6 +413,7 @@ export async function POST(request: NextRequest) {
       name: record.name,
       trigger_word: record.triggerWord,
       gender: record.gender,
+      subject_type: record.subjectType,
       status: normalizedStatus,
       created_at: record.createdAt ?? new Date().toISOString(),
       ...(record.imageUrl ? { image_url: record.imageUrl } : {}),
@@ -350,9 +421,16 @@ export async function POST(request: NextRequest) {
       // Optional HF weights link fields. These columns might not exist; we handle that below.
       weights_url: record.weightsUrl,
       huggingface_url: record.huggingFaceUrl,
+      destination_model: record.destinationModel,
+      training_base_model: record.trainingBaseModel,
+      model_family: record.modelFamily,
       // Alternate camelCase column names for some setups (best-effort).
       weightsUrl: record.weightsUrl,
       huggingFaceUrl: record.huggingFaceUrl,
+      destinationModel: record.destinationModel,
+      trainingBaseModel: record.trainingBaseModel,
+      modelFamily: record.modelFamily,
+      subjectType: record.subjectType,
     };
     const payloadWithTrainingId = record.trainingId
       ? { ...basePayload, training_id: record.trainingId }
@@ -362,6 +440,19 @@ export async function POST(request: NextRequest) {
     );
     const payloadWithoutGender = Object.fromEntries(
       Object.entries(payloadWithTrainingId).filter(([key]) => key !== 'gender')
+    );
+    const payloadWithoutSubjectType = Object.fromEntries(
+      Object.entries(payloadWithTrainingId).filter(([key]) => key !== 'subject_type' && key !== 'subjectType')
+    );
+    const payloadWithoutModelMeta = Object.fromEntries(
+      Object.entries(payloadWithTrainingId).filter(([key]) =>
+        key !== 'destination_model'
+        && key !== 'training_base_model'
+        && key !== 'model_family'
+        && key !== 'destinationModel'
+        && key !== 'trainingBaseModel'
+        && key !== 'modelFamily'
+      )
     );
 
     if (existingQuery.data?.id) {
@@ -381,6 +472,15 @@ export async function POST(request: NextRequest) {
           .update(payloadWithoutStoragePath)
           .eq('id', existingQuery.data.id);
       }
+      if (updateResult.error && (
+        isMissingColumn(updateResult.error, 'subject_type')
+        || isMissingColumn(updateResult.error, 'subjectType')
+      )) {
+        updateResult = await supabase
+          .from('personas')
+          .update(payloadWithoutSubjectType)
+          .eq('id', existingQuery.data.id);
+      }
       if (updateResult.error && (isMissingColumn(updateResult.error, 'weights_url') || isMissingColumn(updateResult.error, 'huggingface_url'))) {
         const payloadWithoutWeights = Object.fromEntries(
           Object.entries(payloadWithTrainingId).filter(([key]) =>
@@ -390,6 +490,16 @@ export async function POST(request: NextRequest) {
         updateResult = await supabase
           .from('personas')
           .update(payloadWithoutWeights)
+          .eq('id', existingQuery.data.id);
+      }
+      if (updateResult.error && (
+        isMissingColumn(updateResult.error, 'destination_model')
+        || isMissingColumn(updateResult.error, 'training_base_model')
+        || isMissingColumn(updateResult.error, 'model_family')
+      )) {
+        updateResult = await supabase
+          .from('personas')
+          .update(payloadWithoutModelMeta)
           .eq('id', existingQuery.data.id);
       }
       if (updateResult.error && isMissingColumn(updateResult.error, 'gender')) {
@@ -422,6 +532,14 @@ export async function POST(request: NextRequest) {
           .from('personas')
           .insert(payloadWithoutStoragePath);
       }
+      if (insertResult.error && (
+        isMissingColumn(insertResult.error, 'subject_type')
+        || isMissingColumn(insertResult.error, 'subjectType')
+      )) {
+        insertResult = await supabase
+          .from('personas')
+          .insert(payloadWithoutSubjectType);
+      }
       if (insertResult.error && (isMissingColumn(insertResult.error, 'weights_url') || isMissingColumn(insertResult.error, 'huggingface_url'))) {
         const payloadWithoutWeights = Object.fromEntries(
           Object.entries(payloadWithTrainingId).filter(([key]) =>
@@ -431,6 +549,15 @@ export async function POST(request: NextRequest) {
         insertResult = await supabase
           .from('personas')
           .insert(payloadWithoutWeights);
+      }
+      if (insertResult.error && (
+        isMissingColumn(insertResult.error, 'destination_model')
+        || isMissingColumn(insertResult.error, 'training_base_model')
+        || isMissingColumn(insertResult.error, 'model_family')
+      )) {
+        insertResult = await supabase
+          .from('personas')
+          .insert(payloadWithoutModelMeta);
       }
       if (insertResult.error && isMissingColumn(insertResult.error, 'gender')) {
         insertResult = await supabase
@@ -467,41 +594,52 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const { client: supabase, error: supabaseError } = getSupabaseAdminClient();
-    if (!supabase || supabaseError) {
-      return NextResponse.json(
-        { error: supabaseError || 'Supabase not configured' },
-        { status: 500 }
-      );
-    }
 
     const userId = request.nextUrl.searchParams.get('userId');
     const personaId = request.nextUrl.searchParams.get('personaId')
       || request.nextUrl.searchParams.get('id');
 
-    let query = supabase
-      .from('personas')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (userId) {
-      query = query.eq('user_id', userId);
-    }
-    if (personaId) {
-      query = query.or(`id.eq.${personaId},training_id.eq.${personaId},model_id.eq.${personaId}`);
-    }
+    let data: any[] = [];
+    if (supabase && !supabaseError) {
+      let query = supabase
+        .from('personas')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (userId) {
+        query = query.eq('user_id', userId);
+      }
+      if (personaId) {
+        query = query.or(`id.eq.${personaId},training_id.eq.${personaId},model_id.eq.${personaId}`);
+      }
 
-    const { data, error } = await query;
-    if (error) {
-      return NextResponse.json(
-        { error: 'Failed to get personas' },
-        { status: 500 }
-      );
+      let supabaseResult = await query;
+      if (supabaseResult.error && isMissingColumn(supabaseResult.error, 'created_at')) {
+        let fallbackQuery = supabase
+          .from('personas')
+          .select('*');
+        if (userId) {
+          fallbackQuery = fallbackQuery.eq('user_id', userId);
+        }
+        if (personaId) {
+          fallbackQuery = fallbackQuery.or(`id.eq.${personaId},training_id.eq.${personaId},model_id.eq.${personaId}`);
+        }
+        supabaseResult = await fallbackQuery;
+      }
+
+      if (supabaseResult.error) {
+        console.warn('Supabase personas read failed, falling back to local registry:', supabaseResult.error);
+      } else {
+        data = Array.isArray(supabaseResult.data) ? supabaseResult.data : [];
+        console.log('📦 API FETCHED PERSONAS (Sample):', data[0]);
+      }
+    } else {
+      console.warn('Supabase unavailable for persona list, using local registry only:', supabaseError || 'not configured');
     }
-    console.log('📦 API FETCHED PERSONAS (Sample):', (data ?? [])[0]);
 
     const storagePath = (p: any) => p.storagePath ?? p.storage_path;
     const rawImageUrl = (p: any) => p.imageUrl ?? p.image_url;
 
-    const normalizedSupabase = await Promise.all((data ?? []).map(async (persona: any) => {
+    const normalizedSupabase = await Promise.all((data ?? []).filter((persona: any) => !isUnsupportedLegacyPersona(persona)).map(async (persona: any) => {
       let imageUrl = rawImageUrl(persona);
       const path = storagePath(persona);
       if (path && typeof path === 'string') {
@@ -523,6 +661,24 @@ export async function GET(request: NextRequest) {
         image_url: imageUrl ?? persona.image_url ?? persona.imageUrl,
         storagePath: persona.storagePath ?? persona.storage_path,
         storage_path: persona.storage_path ?? persona.storagePath,
+        destinationModel: persona.destinationModel ?? persona.destination_model,
+        destination_model: persona.destination_model ?? persona.destinationModel,
+        weightsUrl: persona.weightsUrl ?? persona.weights_url ?? persona.huggingFaceUrl ?? persona.huggingface_url ?? null,
+        weights_url: persona.weights_url ?? persona.weightsUrl ?? persona.huggingFaceUrl ?? persona.huggingface_url ?? null,
+        huggingFaceUrl: persona.huggingFaceUrl ?? persona.huggingface_url ?? null,
+        huggingface_url: persona.huggingface_url ?? persona.huggingFaceUrl ?? null,
+        trainingBaseModel: persona.trainingBaseModel ?? persona.training_base_model,
+        training_base_model: persona.training_base_model ?? persona.trainingBaseModel,
+        modelFamily: persona.modelFamily ?? persona.model_family,
+        model_family: persona.model_family ?? persona.modelFamily,
+        subjectType: persona.subjectType ?? persona.subject_type,
+        subject_type: persona.subject_type ?? persona.subjectType,
+        referenceImages: normalizeReferenceImages(persona.referenceImages ?? persona.reference_images),
+        reference_images: normalizeReferenceImages(persona.reference_images ?? persona.referenceImages),
+        referenceImageCount: persona.referenceImageCount ?? persona.reference_image_count ?? null,
+        reference_image_count: persona.reference_image_count ?? persona.referenceImageCount ?? null,
+        completed_at: persona.completed_at ?? persona.completedAt ?? null,
+        error_message: persona.error_message ?? persona.errorMessage ?? null,
         status: persona.status === 'active' ? 'completed' : persona.status,
       };
     }));
@@ -530,11 +686,11 @@ export async function GET(request: NextRequest) {
     // Merge local personas so newly trained personas always appear even if Supabase insert fails.
     const local = await readPersonas().catch(() => []);
     const localFiltered = (userId ? local.filter(p => p.userId === userId) : local)
-      .filter((p) => p.status !== 'failed');
+      .filter((persona) => !isUnsupportedLegacyPersona(persona));
     const localNormalized = localFiltered.map((p) => ({
       id: p.personaId,
       user_id: p.userId,
-      model_id: p.modelId ?? p.trainingId ?? p.personaId,
+      model_id: p.modelId ?? null,
       training_id: p.trainingId ?? null,
       name: p.name ?? null,
       trigger_word: p.triggerWord ?? null,
@@ -543,23 +699,104 @@ export async function GET(request: NextRequest) {
       imageUrl: p.imageUrl ?? null,
       storage_path: p.storagePath ?? null,
       storagePath: p.storagePath ?? null,
-      status: p.status ?? 'training',
+      destination_model: p.destinationModel ?? null,
+      destinationModel: p.destinationModel ?? null,
+      weights_url: p.weightsUrl ?? null,
+      weightsUrl: p.weightsUrl ?? null,
+      huggingface_url: p.huggingFaceUrl ?? null,
+      huggingFaceUrl: p.huggingFaceUrl ?? null,
+      training_base_model: p.trainingBaseModel ?? null,
+      trainingBaseModel: p.trainingBaseModel ?? null,
+      model_family: p.modelFamily ?? null,
+      modelFamily: p.modelFamily ?? null,
+      subject_type: p.subjectType ?? null,
+      subjectType: p.subjectType ?? null,
+      imageCount: p.imageCount ?? null,
+      image_count: p.imageCount ?? null,
+      referenceImages: p.referenceImages ?? [],
+      reference_images: p.referenceImages ?? [],
+      referenceImageCount: p.referenceImageCount ?? null,
+      reference_image_count: p.referenceImageCount ?? null,
+      status:
+        (p.status === 'training' && !p.trainingId && !p.modelId)
+          ? 'failed'
+          : (p.status ?? 'training'),
       type: 'visual',
       created_at: p.createdAt ?? null,
+      completed_at: p.completedAt ?? null,
+      error_message:
+        p.errorMessage
+        ?? ((p.status === 'training' && !p.trainingId && !p.modelId)
+          ? 'Training record is missing a valid training id.'
+          : null),
     }));
 
     const byKey = (row: any) => row?.training_id ?? row?.model_id ?? row?.id;
+    const statusRank = (status: any) => {
+      const s = String(status || '').toLowerCase();
+      if (s === 'completed' || s === 'active') return 4;
+      if (s === 'failed' || s === 'canceled') return 3;
+      if (s === 'training' || s === 'processing' || s === 'running') return 2;
+      return 1;
+    };
+    const lifecycleTimestamp = (row: any) => {
+      const raw = row?.completed_at ?? row?.completedAt ?? row?.created_at ?? row?.createdAt ?? '';
+      const value = raw ? new Date(raw).getTime() : 0;
+      return Number.isNaN(value) ? 0 : value;
+    };
+    const completenessScore = (row: any) => {
+      let score = 0;
+      if (row?.error_message || row?.errorMessage) score += 1;
+      if (row?.completed_at || row?.completedAt) score += 1;
+      if (row?.image_url || row?.imageUrl) score += 1;
+      if (row?.huggingface_url || row?.huggingFaceUrl || row?.weights_url || row?.weightsUrl) score += 1;
+      return score;
+    };
+    const mergePersonaRows = (current: any, incoming: any) => {
+      const currentRank = statusRank(current?.status);
+      const incomingRank = statusRank(incoming?.status);
+      if (incomingRank > currentRank) {
+        return { ...current, ...incoming };
+      }
+      if (incomingRank < currentRank) {
+        return { ...incoming, ...current };
+      }
+
+      const incomingCompleteness = completenessScore(incoming);
+      const currentCompleteness = completenessScore(current);
+      if (incomingCompleteness > currentCompleteness) {
+        return { ...current, ...incoming };
+      }
+      if (incomingCompleteness < currentCompleteness) {
+        return { ...incoming, ...current };
+      }
+
+      if (lifecycleTimestamp(incoming) >= lifecycleTimestamp(current)) {
+        return { ...current, ...incoming };
+      }
+      return { ...incoming, ...current };
+    };
     const map = new Map<string, any>();
     for (const row of localNormalized) {
       const key = String(byKey(row) || row.id || '');
-      if (key) map.set(key, row);
+      if (!key) continue;
+      const prev = map.get(key);
+      if (!prev) {
+        map.set(key, row);
+        continue;
+      }
+      map.set(key, mergePersonaRows(prev, row));
     }
     for (const row of normalizedSupabase) {
-      if (String(row?.status || '').toLowerCase() === 'failed') continue;
       const key = String(byKey(row) || row.id || '');
       if (!key) continue;
       const prev = map.get(key);
-      map.set(key, prev ? { ...prev, ...row } : row);
+      if (!prev) {
+        map.set(key, row);
+        continue;
+      }
+      // Prefer terminal lifecycle states so stale local "training" rows never win.
+      map.set(key, mergePersonaRows(prev, row));
     }
 
     return NextResponse.json({ personas: Array.from(map.values()) });

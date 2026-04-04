@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
 import { isFaceSwapEnabled } from '@/lib/feature-flags';
+import { readReplicatePrediction } from '@/lib/replicate-prediction';
 
 export async function GET(request: NextRequest) {
   try {
@@ -11,16 +11,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-    
-    if (!apiToken || !apiToken.trim()) {
+    const apiToken = String(process.env.REPLICATE_API_TOKEN || '').trim();
+    if (!apiToken) {
       return NextResponse.json(
         { error: 'API token not configured' },
         { status: 500 }
       );
     }
-
-    const replicate = new Replicate({ auth: apiToken.trim() });
     const searchParams = request.nextUrl.searchParams;
     const predictionId = searchParams.get('predictionId');
 
@@ -31,7 +28,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const prediction = await replicate.predictions.get(predictionId);
+    const prediction = await readReplicatePrediction(predictionId);
     
     return NextResponse.json({
       status: prediction.status,

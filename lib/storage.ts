@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { createR2StorageProvider } from '@/lib/providers/r2';
 import { createSupabaseStorageProvider } from '@/lib/providers/supabase';
 
 export type StorageProviderName = 'supabase' | 's3' | 'cloudinary' | 'r2';
@@ -15,22 +16,39 @@ export interface StorageProvider {
   getPublicUrl?: (key: string) => Promise<string>;
 }
 
+const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const hasR2Config = () =>
+  Boolean(
+    safeTrim(process.env.R2_BUCKET)
+    && safeTrim(process.env.R2_ACCESS_KEY_ID)
+    && safeTrim(process.env.R2_SECRET_ACCESS_KEY)
+    && (safeTrim(process.env.R2_S3_API_URL) || safeTrim(process.env.R2_ACCOUNT_ID))
+  );
+
 const toStorageProviderName = (raw: string | undefined): StorageProviderName => {
-  const normalized = String(raw || 'supabase').trim().toLowerCase();
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (!normalized) {
+    return hasR2Config() ? 'r2' : 'supabase';
+  }
   if (normalized === 'supabase' || normalized === 's3' || normalized === 'cloudinary' || normalized === 'r2') {
     return normalized;
   }
-  return 'supabase';
+  return hasR2Config() ? 'r2' : 'supabase';
 };
 
+export const resolveStorageProviderName = (): StorageProviderName =>
+  toStorageProviderName(process.env.STORAGE_PROVIDER);
+
 export const getStorageProvider = (): StorageProvider => {
-  const provider = toStorageProviderName(process.env.STORAGE_PROVIDER);
+  const provider = resolveStorageProviderName();
   switch (provider) {
     case 'supabase':
       return createSupabaseStorageProvider();
+    case 'r2':
+      return createR2StorageProvider();
     case 's3':
     case 'cloudinary':
-    case 'r2':
       throw new Error(`Storage provider "${provider}" is not implemented yet. Set STORAGE_PROVIDER=supabase.`);
     default:
       throw new Error(`Unsupported storage provider: ${provider}`);

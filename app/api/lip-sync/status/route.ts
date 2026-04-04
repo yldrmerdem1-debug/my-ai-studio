@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
+import { createReplicateClient } from '@/lib/replicate-client';
 
 function extractVideoUrl(output: any): string | null {
   if (!output) return null;
@@ -26,15 +26,13 @@ function extractVideoUrl(output: any): string | null {
 
 export async function GET(request: NextRequest) {
   try {
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-
-    if (!apiToken || apiToken.trim() === '') {
+    const apiToken = String(process.env.REPLICATE_API_TOKEN || '').trim();
+    if (!apiToken) {
       return NextResponse.json(
         { error: 'REPLICATE_API_TOKEN not configured' },
         { status: 500 }
       );
     }
-
     if (!apiToken.startsWith('r8_')) {
       return NextResponse.json(
         { error: 'Invalid API token format' },
@@ -52,7 +50,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const replicate = new Replicate({ auth: apiToken.trim() });
+    const replicate = createReplicateClient();
     const prediction = await replicate.predictions.get(predictionId);
 
     const videoUrl = prediction.status === 'succeeded' ? extractVideoUrl(prediction.output) : null;

@@ -1,14 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createRunwayImageToVideoTask, type RunwayI2VModel, type RunwayI2VRatio } from '@/lib/runway';
 import { ensurePublicAssetUrl } from '@/lib/public-asset-url';
+import { getConfiguredSiteUrl } from '@/lib/site-url';
 
 export const runtime = 'nodejs';
 
-const resolveBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return 'http://localhost:3000';
-};
+const resolveBaseUrl = () => getConfiguredSiteUrl();
 
 const ensureAbsoluteUrl = (url: string) => {
   if (!url) return url;

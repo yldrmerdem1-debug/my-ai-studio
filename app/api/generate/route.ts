@@ -3,6 +3,7 @@ import Replicate from 'replicate';
 import { translate } from '@vitalets/google-translate-api';
 import sharp from 'sharp';
 import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
+import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 // Map action types to Replicate models
 // Updated to use the specific models requested by the user
@@ -13,8 +14,132 @@ const MODEL_MAP: Record<string, string> = {
   'background-removal': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
   '3d-motion': 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438',
   'ad-script': 'meta/llama-3.1-8b-instruct:af1c688b4a10d836358128ace4b7821950d6cbcd3d4532511146196b3b7c5c2b',
-  'generate-image': 'black-forest-labs/flux-dev',
+  'generate-image': 'black-forest-labs/flux-2-klein-9b-base-lora',
 };
+
+const extractUrl = (output: any): string | null => {
+  if (!output) return null;
+  if (typeof output === 'string' && output.startsWith('http')) return output;
+  if (Array.isArray(output)) {
+    const urlString = output.find((x) => typeof x === 'string' && x.startsWith('http'));
+    if (urlString) return urlString;
+  }
+  if (typeof output === 'object' && output !== null) {
+    for (const v of Object.values(output)) {
+      if (typeof v === 'string' && v.startsWith('http')) return v;
+      if (Array.isArray(v)) {
+        const nestedUrl = v.find((x) => typeof x === 'string' && x.startsWith('http'));
+        if (nestedUrl) return nestedUrl;
+      }
+      if (typeof v === 'object' && v !== null) {
+        for (const nestedV of Object.values(v)) {
+          if (typeof nestedV === 'string' && nestedV.startsWith('http')) return nestedV;
+        }
+      }
+    }
+  }
+  return null;
+};
+
+const normalizeAspectRatio = (value: unknown): string => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '9:16';
+  if (raw === 'portrait') return '9:16';
+  if (raw === 'landscape') return '16:9';
+  if (raw === 'square') return '1:1';
+  if (raw === 'match_input_image') return 'match_input_image';
+  return raw;
+};
+
+const toImageArray = (value: unknown): string[] => {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  const one = String(value).trim();
+  return one ? [one] : [];
+};
+
+const resolvePersonaLoraWeightUrl = async ({
+  userId,
+  personaId,
+}: {
+  userId?: string;
+  personaId?: string;
+}): Promise<string> => {
+  const { client } = getSupabaseAdminClient();
+  if (!client) return '';
+
+  const candidates: string[] = [];
+  const extractFromRow = (row: Record<string, any> | null | undefined) => {
+    if (!row) return;
+    const value = String(
+      row.lora_weight_url
+      || row.loraWeightUrl
+      || row.persona_lora_weight_url
+      || row.personaLoraWeightUrl
+      || ''
+    ).trim();
+    if (value) candidates.push(value);
+  };
+
+  const safeUserId = String(userId || '').trim();
+  const safePersonaId = String(personaId || '').trim();
+
+  const probes: Array<{ table: 'users' | 'subscriptions'; key: string; value: string }> = [];
+  if (safeUserId) {
+    probes.push({ table: 'users', key: 'id', value: safeUserId });
+    probes.push({ table: 'subscriptions', key: 'user_id', value: safeUserId });
+  }
+  if (safePersonaId) {
+    probes.push({ table: 'subscriptions', key: 'persona_id', value: safePersonaId });
+    probes.push({ table: 'users', key: 'persona_id', value: safePersonaId });
+  }
+
+  for (const probe of probes) {
+    try {
+      const query = client.from(probe.table).select('*').eq(probe.key, probe.value);
+      const { data, error } = probe.table === 'subscriptions'
+        ? await query.order('created_at', { ascending: false }).limit(1)
+        : await query.limit(1);
+      if (error || !Array.isArray(data) || data.length === 0) continue;
+      extractFromRow(data[0] as Record<string, any>);
+    } catch {
+      // Ignore missing table/column mismatch to keep backward compatibility.
+    }
+  }
+
+  return candidates[0] || '';
+};
+
+export async function GET(request: NextRequest) {
+  try {
+    const apiToken = process.env.REPLICATE_API_TOKEN;
+    if (!apiToken?.trim()) {
+      return NextResponse.json({ error: 'REPLICATE_API_TOKEN not configured' }, { status: 500 });
+    }
+    const predictionId = String(request.nextUrl.searchParams.get('predictionId') || '').trim();
+    if (!predictionId) {
+      return NextResponse.json({ error: 'predictionId is required' }, { status: 400 });
+    }
+
+    const replicate = new Replicate({ auth: apiToken.trim() });
+    const prediction = await replicate.predictions.get(predictionId);
+    const url = extractUrl((prediction as any)?.output);
+
+    return NextResponse.json({
+      predictionId,
+      status: (prediction as any)?.status || 'starting',
+      output: url || null,
+      error: (prediction as any)?.error || null,
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error?.message || 'Failed to fetch prediction status' },
+      { status: 500 }
+    );
+  }
+}
 
 /**
  * Translates text to English if it's not already in English
@@ -113,7 +238,18 @@ export async function POST(request: NextRequest) {
       auth: apiToken.trim(),
     });
 
-    const { action, image, prompt, triggerWord, user, personaMode, personaId, trainingId } = await request.json();
+    const {
+      action,
+      image,
+      images,
+      prompt,
+      triggerWord,
+      user,
+      personaMode,
+      personaId,
+      aspectRatio,
+      waitForResult,
+    } = await request.json();
 
     const wantsPersona = personaMode === 'persona' || !!triggerWord;
     if (wantsPersona) {
@@ -139,7 +275,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!image && action !== 'ad-script') {
+    if (!image && action !== 'ad-script' && action !== 'generate-image') {
       return NextResponse.json(
         { error: 'Image is required for this action' },
         { status: 400 }
@@ -180,33 +316,60 @@ export async function POST(request: NextRequest) {
         },
       });
     } else if (action === 'generate-image') {
+      // NOTE: Keep the same Replicate key and ensure it has access to this new model.
+      // If access is missing, Replicate will return 401/403 from create prediction.
       let imagePrompt = prompt || 'high quality portrait photo, studio lighting';
       imagePrompt = await translateToEnglish(imagePrompt);
 
-      let loraWeights: string | null = null;
-      if (trainingId) {
-        const training = await replicate.trainings.get(trainingId);
-        const output = (training?.output ?? {}) as { weights?: string; weights_url?: string };
-        loraWeights = output?.weights ?? output?.weights_url ?? null;
-        if (!loraWeights) {
-          return NextResponse.json(
-            { error: 'Training weights not available yet' },
-            { status: 400 }
-          );
-        }
+      const requestImages = [...toImageArray(images), ...toImageArray(image)];
+      const userId = String((user as any)?.id || '').trim();
+      const loraWeightUrl = await resolvePersonaLoraWeightUrl({
+        userId,
+        personaId: String(personaId || '').trim(),
+      });
+
+      if (!loraWeightUrl) {
+        return NextResponse.json(
+          { error: 'Lutfen Persona egitin', code: 'PERSONA_LORA_REQUIRED' },
+          { status: 400 }
+        );
+      }
+
+      const modelInput: Record<string, any> = {
+        prompt: imagePrompt,
+        lora_weights: [loraWeightUrl],
+        aspect_ratio: normalizeAspectRatio(aspectRatio) || (requestImages.length > 0 ? 'match_input_image' : '9:16'),
+        output_megapixels: 2,
+        output_format: 'jpg',
+        output_quality: 95,
+      };
+      if (requestImages.length > 0) {
+        modelInput.images = requestImages;
       }
 
       prediction = await replicate.predictions.create({
-        version: model,
-        input: {
-          prompt: imagePrompt,
-          aspect_ratio: '16:9',
-          output_format: 'png',
-          output_quality: 100,
-          num_inference_steps: 50,
-          ...(loraWeights ? { lora_weights: loraWeights, lora_scale: 1.0 } : {}),
-        },
+        model,
+        input: modelInput,
       });
+
+      const wantsSyncResult =
+        waitForResult === true
+        || waitForResult === 'true'
+        || waitForResult === 1
+        || waitForResult === '1';
+      if (!wantsSyncResult) {
+        const pollUrl = `/api/generate?predictionId=${encodeURIComponent(prediction.id)}`;
+        return NextResponse.json(
+          {
+            success: true,
+            async: true,
+            status: prediction.status || 'starting',
+            predictionId: prediction.id,
+            pollUrl,
+          },
+          { status: 202 }
+        );
+      }
     } else if (action === 'studio-background') {
       // PROPER INPAINTING APPROACH: Use mask-based inpainting for 100% subject preservation
       // Step 1: Extract subject mask using background removal (rembg)
@@ -368,45 +531,6 @@ export async function POST(request: NextRequest) {
     console.log('Prediction created, ID:', prediction.id);
     console.log('Initial status:', prediction.status);
     console.log('Initial output (raw):', JSON.stringify(prediction.output, null, 2));
-
-    // URL extraction helper - supports string, array of strings, or object with URL fields
-    const extractUrl = (output: any): string | null => {
-      if (!output) return null;
-      
-      // Case 1: Direct string URL
-      if (typeof output === 'string' && output.startsWith('http')) {
-        return output;
-      }
-      
-      // Case 2: Array of strings - find first URL string
-      if (Array.isArray(output)) {
-        const urlString = output.find(x => typeof x === 'string' && x.startsWith('http'));
-        if (urlString) return urlString;
-      }
-      
-      // Case 3: Object - search all values for URL strings
-      if (typeof output === 'object' && output !== null) {
-        for (const v of Object.values(output)) {
-          if (typeof v === 'string' && v.startsWith('http')) {
-            return v;
-          }
-          // Also check nested arrays/objects recursively (one level deep)
-          if (Array.isArray(v)) {
-            const nestedUrl = v.find(x => typeof x === 'string' && x.startsWith('http'));
-            if (nestedUrl) return nestedUrl;
-          }
-          if (typeof v === 'object' && v !== null) {
-            for (const nestedV of Object.values(v)) {
-              if (typeof nestedV === 'string' && nestedV.startsWith('http')) {
-                return nestedV;
-              }
-            }
-          }
-        }
-      }
-      
-      return null;
-    };
 
     // Poll for completion - check every 2 seconds, max 60 seconds (30 attempts)
     const pollInterval = 2000; // 2 seconds

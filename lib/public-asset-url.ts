@@ -61,9 +61,15 @@ export const ensurePublicAssetUrl = async (
 ): Promise<string> => {
   const token = options.token || '';
   const expiresSec = options.expiresSec ?? 60 * 60 * 6;
-  const provider = options.provider || getStorageProvider();
   const bypassReplicateFileApi = options.bypassReplicateFileApi ?? true;
   const logger = options.logger;
+  let provider: StorageProvider | null = options.provider || null;
+  const requireProvider = () => {
+    if (!provider) {
+      provider = getStorageProvider();
+    }
+    return provider;
+  };
 
   const rawUrl = typeof input.url === 'string' ? input.url.trim() : '';
   if (bypassReplicateFileApi && rawUrl && isReplicateFileApiUrl(rawUrl)) {
@@ -72,7 +78,7 @@ export const ensurePublicAssetUrl = async (
   }
 
   if (input.storagePath) {
-    const signed = await provider.getSignedUrl(input.storagePath, expiresSec);
+    const signed = await requireProvider().getSignedUrl(input.storagePath, expiresSec);
     logger?.info?.('ensurePublicAssetUrl: signed from storagePath', input.storagePath);
     return signed;
   }
@@ -90,8 +96,8 @@ export const ensurePublicAssetUrl = async (
   if (input.buffer && input.buffer.length > 0) {
     const contentType = pickImageContentType(input.contentType);
     const key = makeStorageObjectKey('personas/grok-inputs', contentType, input.suggestedName);
-    await provider.upload(input.buffer, contentType, key);
-    const signed = await provider.getSignedUrl(key, expiresSec);
+    await requireProvider().upload(input.buffer, contentType, key);
+    const signed = await requireProvider().getSignedUrl(key, expiresSec);
     logger?.info?.('ensurePublicAssetUrl: uploaded from buffer', { key, contentType });
     return signed;
   }
@@ -119,8 +125,8 @@ export const ensurePublicAssetUrl = async (
     });
     const contentType = pickImageContentType(media.contentType);
     const key = makeStorageObjectKey('personas/grok-inputs', contentType, input.suggestedName);
-    await provider.upload(media.buffer, contentType, key);
-    const signed = await provider.getSignedUrl(key, expiresSec);
+    await requireProvider().upload(media.buffer, contentType, key);
+    const signed = await requireProvider().getSignedUrl(key, expiresSec);
     logger?.info?.('ensurePublicAssetUrl: downloaded and re-uploaded', { source: absolute, key, contentType });
     return signed;
   }

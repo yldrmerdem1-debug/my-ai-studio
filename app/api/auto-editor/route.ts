@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
-import ffmpeg from 'fluent-ffmpeg';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getFfmpeg } from '@/lib/ffmpeg-client';
+import { persistGeneratedBuffer } from '@/lib/generated-assets';
+import { getConfiguredSiteUrl } from '@/lib/site-url';
 
 export const runtime = 'nodejs';
 
@@ -27,11 +29,7 @@ const bufferFromDataUrl = (dataUrl: string) => {
   return Buffer.from(base64, 'base64');
 };
 
-const resolveBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return 'http://localhost:3000';
-};
+const resolveBaseUrl = () => getConfiguredSiteUrl();
 
 const fetchToBuffer = async (url: string) => {
   if (isDataUrl(url)) {
@@ -63,12 +61,11 @@ const writeTempFile = async (buffer: Buffer, filename: string) => {
 };
 
 const writePublicVideo = async (buffer: Buffer) => {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await fsPromises.mkdir(dir, { recursive: true });
-  const fileName = `ad-${crypto.randomUUID()}.mp4`;
-  const filePath = path.join(dir, fileName);
-  await fsPromises.writeFile(filePath, buffer);
-  return `/generated/${fileName}`;
+  return persistGeneratedBuffer(buffer, {
+    prefix: 'generated/videos',
+    suggestedName: `ad-${crypto.randomUUID()}.mp4`,
+    contentType: 'video/mp4',
+  });
 };
 
 const formatSrtTime = (seconds: number) => {
@@ -119,9 +116,10 @@ const escapeSubtitlePath = (filePath: string) => {
   return filePath.replace(/\\/g, '/').replace(/:/g, '\\:');
 };
 
-const getVideoDuration = (filePath: string) => {
+const getVideoDuration = async (filePath: string) => {
+  const ffmpeg = await getFfmpeg();
   return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (error, metadata) => {
+    ffmpeg.ffprobe(filePath, (error: Error | null, metadata: { format?: { duration?: number } }) => {
       if (error) {
         reject(error);
         return;
@@ -188,6 +186,7 @@ export async function POST(request: Request) {
         finalLabel = 'outv';
       }
 
+      const ffmpeg = await getFfmpeg();
       const command = ffmpeg().input(videoPath);
       if (logoPath) {
         command.input(logoPath);
@@ -212,7 +211,7 @@ export async function POST(request: Request) {
           ])
           .complexFilter(filter)
           .on('end', () => resolve())
-          .on('error', (err, stdout, stderr) => {
+          .on('error', (err: Error, stdout: string | null, stderr: string | null) => {
             reject(new Error(`FFmpeg packaging failed: ${err?.message || err}\n${stderr || stdout || ''}`));
           })
           .save(outputPath);

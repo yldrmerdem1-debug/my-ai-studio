@@ -2,9 +2,39 @@ import { NextRequest } from 'next/server';
 import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
 import { upsertPersona } from '@/lib/persona-registry';
 import archiver from 'archiver';
-import { createWriteStream } from 'fs';
+import { writeFile } from 'node:fs/promises';
 import os from 'os';
 import path from 'path';
+import { PassThrough } from 'node:stream';
+import { getStorageProvider, makeStorageObjectKey } from '@/lib/storage';
+import { isLocalAssetFallbackEnabled } from '@/lib/site-url';
+
+const buildTrainingZipBuffer = async (files: File[]) => {
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  const output = new PassThrough();
+  const chunks: Buffer[] = [];
+  const zipPromise = new Promise<Buffer>((resolve, reject) => {
+    output.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    output.on('end', () => resolve(Buffer.concat(chunks)));
+    output.on('error', reject);
+    archive.on('error', reject);
+  });
+
+  archive.pipe(output);
+
+  for (let i = 0; i < files.length; i += 1) {
+    const file = files[i];
+    const arrayBuffer = await file.arrayBuffer();
+    const extension = path.extname(file.name) || (file.type ? `.${file.type.split('/')[1]}` : '.jpg');
+    const filename = `image_${String(i + 1).padStart(3, '0')}${extension}`;
+    archive.append(Buffer.from(arrayBuffer), { name: filename });
+  }
+
+  await archive.finalize();
+  return zipPromise;
+};
 
 export async function POST(request: NextRequest) {
   try {
@@ -77,37 +107,46 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const filename = `persona-${personaId}-${Date.now()}.zip`;
-    const tempZipPath = path.join(os.tmpdir(), filename);
-    const output = createWriteStream(tempZipPath);
-    const archive = archiver('zip', { zlib: { level: 6 } });
-    const archivePromise = new Promise<void>((resolve, reject) => {
-      output.on('close', () => resolve());
-      output.on('error', reject);
-      archive.on('error', reject);
-    });
-    archive.pipe(output);
+    const zipBuffer = await buildTrainingZipBuffer(files);
+    const fallbackZipUrl = new URL(`/api/persona/zip/${personaId}`, request.nextUrl.origin).toString();
+    let trainingZipUrl = fallbackZipUrl;
+    let trainingZipPath: string | undefined;
+    let trainingZipStoragePath: string | undefined;
 
-    for (let i = 0; i < files.length; i += 1) {
-      const file = files[i];
-      const arrayBuffer = await file.arrayBuffer();
-      const extension = path.extname(file.name) || (file.type ? `.${file.type.split('/')[1]}` : '.jpg');
-      const filename = `image_${String(i + 1).padStart(3, '0')}${extension}`;
-      archive.append(Buffer.from(arrayBuffer), { name: filename });
+    try {
+      const provider = getStorageProvider();
+      trainingZipStoragePath = makeStorageObjectKey(
+        `personas/${personaId}/training-zips`,
+        'application/zip',
+        'images.zip'
+      );
+      await provider.upload(zipBuffer, 'application/zip', trainingZipStoragePath);
+      if (provider.getPublicUrl) {
+        try {
+          trainingZipUrl = await provider.getPublicUrl(trainingZipStoragePath);
+        } catch {
+          trainingZipUrl = await provider.getSignedUrl(trainingZipStoragePath, 60 * 60 * 24 * 7);
+        }
+      } else {
+        trainingZipUrl = await provider.getSignedUrl(trainingZipStoragePath, 60 * 60 * 24 * 7);
+      }
+    } catch (storageError: any) {
+      if (!isLocalAssetFallbackEnabled()) {
+        throw new Error(`Training ZIP storage failed: ${storageError?.message || storageError}`);
+      }
+      const filename = `persona-${personaId}-${Date.now()}.zip`;
+      trainingZipPath = path.join(os.tmpdir(), filename);
+      await writeFile(trainingZipPath, zipBuffer);
     }
-
-    await archive.finalize();
-    await archivePromise;
-
-    const zipUrl = new URL(`/api/persona/zip/${personaId}`, request.nextUrl.origin).toString();
 
     await upsertPersona({
       personaId,
       userId: userCheck.userId,
       triggerWord,
       imageCount,
-      trainingZipUrl: zipUrl,
-      trainingZipPath: tempZipPath,
+      trainingZipUrl,
+      trainingZipPath,
+      trainingZipStoragePath,
       status: 'training',
       createdAt: new Date().toISOString(),
     });
@@ -115,7 +154,7 @@ export async function POST(request: NextRequest) {
     return Response.json({
       success: true,
       message: 'Training inputs prepared',
-      trainingZipUrl: zipUrl,
+      trainingZipUrl,
     });
   } catch (error: any) {
     console.error('PREPARE TRAINING ERROR:', error);

@@ -9,6 +9,7 @@ import {
 } from '@/lib/persona-registry';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 import { downloadMediaWithValidation, resolveReplicateDownloadUrl } from '@/lib/replicate-media';
+import { normalizeLoraWeightsBuffer } from '@/lib/lora-weights';
 
 type SyncResult = {
   processed: number;
@@ -223,10 +224,14 @@ async function main() {
               warn: (...args) => console.warn(...args),
             },
           });
+          const normalizedWeights = normalizeLoraWeightsBuffer(media.buffer, downloadUrl);
+          if (normalizedWeights.kind !== 'safetensors') {
+            throw new Error('Downloaded weights could not be normalized to safetensors.');
+          }
 
           const tempPath = path.join(process.cwd(), 'public', 'temp', `lora-${id}.safetensors`);
           await fs.mkdir(path.dirname(tempPath), { recursive: true });
-          await fs.writeFile(tempPath, media.buffer);
+          await fs.writeFile(tempPath, normalizedWeights.buffer);
 
           console.log('-> uploading weights to Hugging Face...');
           const remotePath = `personas/${id}/lora.safetensors`;

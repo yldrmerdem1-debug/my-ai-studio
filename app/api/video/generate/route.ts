@@ -1,12 +1,8 @@
 import { NextResponse } from 'next/server';
 import Replicate from 'replicate';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
-import crypto from 'node:crypto';
+import { persistGeneratedStream } from '@/lib/generated-assets';
 import { getGeminiModelId } from '@/lib/gemini';
 import { generateAtmosphere, generateSpeech } from '@/lib/audio-service';
 import { CINEMATIC_VISUAL_SUFFIX } from '@/lib/constants';
@@ -16,7 +12,9 @@ import { mixVideoWithDucking } from '@/lib/videoProcessor';
 import { runVeoImageToVideo } from '@/lib/veo-client';
 import { readPersonas, type PersonaRecord } from '@/lib/persona-registry';
 import { ensurePromptHasTriggers, uniqStrings, withDownloadTrue } from '@/lib/lora-utils';
+import { isSensitiveFlag, softenVeoPrompt } from '@/lib/video-generation-safety';
 import { generateXaiVideo } from '@/lib/xai-video';
+import { getConfiguredSiteUrl } from '@/lib/site-url';
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
   fetch: (url, options) => fetch(url, { ...(options as RequestInit), timeout: 300000 } as any),
@@ -47,14 +45,12 @@ const findFirstStream = (output: any): ReadableStream | null => {
   return null;
 };
 
-const saveStreamToPublic = async (stream: ReadableStream, extension: string): Promise<string> => {
-  const dir = path.join(process.cwd(), 'public', 'generated');
-  await mkdir(dir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const filePath = path.join(dir, fileName);
-  await pipeline(Readable.fromWeb(stream as any), createWriteStream(filePath));
-  return `/generated/${fileName}`;
-};
+const saveStreamToPublic = async (stream: ReadableStream, extension: string): Promise<string> =>
+  persistGeneratedStream(stream, {
+    prefix: extension === 'mp4' ? 'generated/videos' : 'generated/images',
+    suggestedName: `video-generate.${extension}`,
+    contentType: extension === 'mp4' ? 'video/mp4' : 'image/png',
+  });
 
 const toBase64 = (buffer: ArrayBuffer) => Buffer.from(buffer).toString('base64');
 
@@ -193,57 +189,12 @@ const containsSoftAction = (text: string) => {
   return SOFT_ACTION_PATTERNS.some(pattern => pattern.test(text));
 };
 
-const isSensitiveFlag = (error: any) => {
-  const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('flagged as sensitive') || message.includes('e005') || message.includes('sensitive');
-};
-
 const isRateLimit = (error: any) => {
   const message = String(error?.message || error || '').toLowerCase();
   return message.includes('429') || message.includes('resource_exhausted') || message.includes('rate limit');
 };
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-const softenVeoPrompt = (prompt: string, level: 1 | 2 | 3) => {
-  let softened = prompt;
-  const safetyTail = ' no blood, no injury, no harm, no violence, no weapons, no killing, family-friendly action.';
-  const swaps: Array<[RegExp, string]> = [
-    [/\bstrike\b/gi, 'forceful move'],
-    [/\bpowerful\b/gi, 'dramatic'],
-    [/\bimpact\b/gi, 'shockwave'],
-    [/\bhit\b/gi, 'push'],
-    [/\bpunch\b/gi, 'gesture'],
-    [/\bknock(ed)?\b/gi, 'send'],
-    [/\bflying backwards\b/gi, 'sliding backward'],
-    [/\bexecuting\b/gi, 'performing'],
-    [/\btough\b/gi, 'determined'],
-  ];
-
-  if (level >= 1) {
-    for (const [re, rep] of swaps) softened = softened.replace(re, rep);
-    if (!softened.toLowerCase().includes('no blood')) softened += ` ${safetyTail}`;
-  }
-
-  if (level >= 2) {
-    softened = softened.replace(
-      /\b(superhero)\s+(sliding backward|flying backwards)\s+from\s+the\s+(impact|shockwave)\b/gi,
-      '$1 is pushed back by a visible shockwave (no contact, no injury)'
-    );
-    softened = softened.replace(/\b(stunt choreography)\b/gi, 'stage choreography (no contact)');
-    softened += ' show no physical contact; depict a near-miss or shockwave-only moment.';
-  }
-
-  if (level >= 3) {
-    softened =
-      'dynamic low-angle cinematic shot, determined elderly man with a mustache makes a dramatic gesture, ' +
-      'caped superhero slides backward as if pushed by wind or shockwave (no contact, no harm), ' +
-      'motion blur, kinetic camera movement, dramatic lighting, high contrast, smooth tracking shot, realistic movement, ' +
-      'family-friendly action, no violence, no injury, no blood.';
-  }
-
-  return softened.trim();
-};
 
 
 const resolveReplicateFileUrl = async (apiUrl: string, token: string): Promise<string> => {
@@ -288,11 +239,7 @@ const resolveReplicatePublicUrl = async (url: string) => {
   return url;
 };
 
-const resolveBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return 'http://localhost:3000';
-};
+const resolveBaseUrl = () => getConfiguredSiteUrl();
 
 const ensureAbsoluteUrl = (url: string) => {
   if (!url) return url;

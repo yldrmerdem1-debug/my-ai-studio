@@ -8,6 +8,7 @@ import { Image as ImageIcon, Upload, Sparkles, Loader2, Eraser, Camera, User, Wa
 import { useToast } from '@/hooks/useToast';
 import PreviewArea from '@/components/PreviewArea';
 import { usePersona } from '@/hooks/usePersona';
+import { fileToDataUrl } from '@/lib/client/file-data-url';
 import { canUsePersona } from '@/lib/subscription';
 import { isPublicFaceSwapEnabled } from '@/lib/feature-flags';
 
@@ -80,15 +81,6 @@ export default function StudioPage() {
     return true;
   };
 
-  const fileToDataUrl = async (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-    });
-  };
-
   const tools = [
     {
       id: 'background-remove' as ToolMode,
@@ -144,9 +136,9 @@ export default function StudioPage() {
     setResultImage(null);
 
     try {
-    const imageDataUrl = await fileToDataUrl(uploadedImage);
-    const personaId = getPersonaId();
-    const trainingId = useSelectedPersona ? selectedTrainingId : null;
+      const imageDataUrl = await fileToDataUrl(uploadedImage);
+      const personaId = getPersonaId();
+      const trainingId = useSelectedPersona ? selectedTrainingId : null;
 
       const response = await fetch('/api/generate', {
         method: 'POST',
@@ -204,15 +196,15 @@ export default function StudioPage() {
     setResultImage(null);
 
     try {
-    const imageDataUrl = await fileToDataUrl(uploadedImage);
-    const personaId = getPersonaId();
-    const trainingId = useSelectedPersona ? selectedTrainingId : null;
-    const needsTrigger = selectedTriggerWord && backgroundPrompt
-      ? !backgroundPrompt.toLowerCase().includes(selectedTriggerWord.toLowerCase())
-      : false;
-    const finalPrompt = selectedTriggerWord && needsTrigger
-      ? `${selectedTriggerWord} ${backgroundPrompt}`.trim()
-      : backgroundPrompt;
+      const imageDataUrl = await fileToDataUrl(uploadedImage);
+      const personaId = getPersonaId();
+      const trainingId = useSelectedPersona ? selectedTrainingId : null;
+      const needsTrigger = selectedTriggerWord && backgroundPrompt
+        ? !backgroundPrompt.toLowerCase().includes(selectedTriggerWord.toLowerCase())
+        : false;
+      const finalPrompt = selectedTriggerWord && needsTrigger
+        ? `${selectedTriggerWord} ${backgroundPrompt}`.trim()
+        : backgroundPrompt;
 
       const response = await fetch('/api/generate', {
         method: 'POST',

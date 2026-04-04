@@ -5,6 +5,7 @@ import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Sparkles, Upload, Video, FileText, Loader2, BadgeCheck } from 'lucide-react';
+import { fileToDataUrl } from '@/lib/client/file-data-url';
 
 type OutputMap = Record<string, string>;
 
@@ -69,12 +70,7 @@ export default function AdCreationPage() {
     setOutputs({});
     try {
       const logoDataUrl = logoFile
-        ? await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(new Error('Failed to read logo'));
-          reader.readAsDataURL(logoFile);
-        })
+        ? await fileToDataUrl(logoFile)
         : undefined;
 
       const response = await fetch('/api/auto-editor', {

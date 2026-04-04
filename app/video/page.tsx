@@ -3,12 +3,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
-import { ImagePlus, Loader2, Plus, X, Video, Sparkles, CheckCircle2, User, ChevronDown, ChevronUp } from 'lucide-react';
+import { ImagePlus, Loader2, Plus, X, Video, Sparkles, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
 import { usePersona } from '@/hooks/usePersona';
 import VideoPlayerWithAudio from '@/components/VideoPlayerWithAudio';
-import { VIDEO_ENGINES_CONFIG, type VideoEngineKey } from '@/lib/constants';
+import {
+  VIDEO_ENGINES_CONFIG,
+  VIDEO_QUALITY_PRESET_LABELS,
+  type VideoEngineKey,
+  type VideoQualityPreset,
+} from '@/lib/constants';
 import { isPublicFaceSwapEnabled } from '@/lib/feature-flags';
 import { isPremiumUser } from '@/lib/subscription';
+import { usePersonaOptions, type PersonaOption } from '@/hooks/usePersonaOptions';
+import { fileToDataUrl } from '@/lib/client/file-data-url';
+import { useVideoGenerationPolling } from '@/app/video/_hooks/useVideoGenerationPolling';
 
 type RunwayModel =
   | 'gen4.5'
@@ -18,25 +26,8 @@ type RunwayModel =
   | 'veo3.1_fast'
   | 'veo3';
 
-type PersonaOption = {
-  id: string;
-  name: string;
-  triggerWord?: string;
-  trigger_word?: string;
-  modelId?: string;
-  model_id?: string;
-  image_url?: string;
-  imageUrl?: string;
-  type?: 'visual' | 'voice';
-  voiceStatus?: 'none' | 'training' | 'ready';
-  visualStatus?: 'none' | 'training' | 'ready';
-  status?: string;
-};
-
 type SelectedAssets = {
   selectedPersona: PersonaOption | null;
-  voicePersonaId: string | null;
-  voicePersonaName: string | null;
   imageFile: File | null;
   imagePreview: string | null;
 };
@@ -59,110 +50,6 @@ type DirectorPlanPayload = {
   createdAt?: string;
 };
 
-let cachedPersonas: PersonaOption[] | null = null;
-
-const usePersonaOptions = (user: any) => {
-  const [personaOptions, setPersonaOptions] = useState<PersonaOption[]>([]);
-  const cacheKey = useMemo(() => {
-    const id = user?.id || 'anon';
-    return `personaOptionsCache:${id}`;
-  }, [user?.id]);
-
-  const fetchPersonas = useCallback((force = false) => {
-    let isActive = true;
-    if (cachedPersonas && !force) {
-      setPersonaOptions(cachedPersonas);
-      return () => {
-        isActive = false;
-      };
-    }
-    if (!cachedPersonas && typeof window !== 'undefined') {
-      try {
-        const cachedRaw = localStorage.getItem(cacheKey);
-        const cachedParsed = cachedRaw ? JSON.parse(cachedRaw) : null;
-        if (Array.isArray(cachedParsed) && cachedParsed.length > 0) {
-          cachedPersonas = cachedParsed;
-          setPersonaOptions(cachedParsed);
-        }
-      } catch (error) {
-        console.warn('Failed to read persona cache', error);
-      }
-    }
-    const run = async () => {
-      try {
-        const userQuery = user?.id ? `?userId=${user.id}` : '';
-        const cacheBuster = Date.now();
-        const listQuery = userQuery ? `${userQuery}&t=${cacheBuster}` : `?t=${cacheBuster}`;
-        const res = await fetch(`/api/save-persona${listQuery}`, {
-          cache: 'no-store',
-          headers: { Pragma: 'no-cache' },
-        });
-        const rawData = await res.json().catch(() => ({}));
-        const personasPayload = Array.isArray(rawData?.personas) ? rawData.personas : Array.isArray(rawData) ? rawData : [];
-        if (!res.ok) {
-          console.error('Supabase Response:', rawData);
-          if (isActive) {
-            setPersonaOptions([]);
-          }
-          return;
-        }
-        console.log('🔥 RAW DATA INTO STATE:', personasPayload);
-        if (isActive) {
-          cachedPersonas = personasPayload;
-          setPersonaOptions(personasPayload);
-          if (typeof window !== 'undefined') {
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify(cachedPersonas));
-            } catch (error) {
-              console.warn('Failed to write persona cache', error);
-            }
-          }
-        }
-      } catch (error) {
-        if (isActive) {
-          setPersonaOptions([]);
-        }
-      }
-    };
-    run();
-    return () => {
-      isActive = false;
-    };
-  }, [user?.id, cacheKey]);
-
-  useEffect(() => {
-    const cleanup = fetchPersonas();
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, [fetchPersonas]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handleUpdate = () => {
-      cachedPersonas = null;
-      fetchPersonas(true);
-    };
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === 'personasUpdated') {
-        handleUpdate();
-      }
-    };
-    window.addEventListener('personas:updated', handleUpdate);
-    window.addEventListener('storage', handleStorage);
-    window.addEventListener('focus', handleUpdate);
-    document.addEventListener('visibilitychange', handleUpdate);
-    return () => {
-      window.removeEventListener('personas:updated', handleUpdate);
-      window.removeEventListener('storage', handleStorage);
-      window.removeEventListener('focus', handleUpdate);
-      document.removeEventListener('visibilitychange', handleUpdate);
-    };
-  }, [fetchPersonas]);
-
-  return { personaOptions };
-};
-
 export default function VideoPage() {
   const { user } = usePersona();
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
@@ -171,6 +58,7 @@ export default function VideoPage() {
   const [selectedEngine, setSelectedEngine] = useState<
     VideoEngineKey
   >('grok');
+  const [selectedQuality, setSelectedQuality] = useState<VideoQualityPreset>(VIDEO_ENGINES_CONFIG.grok.defaultQuality);
   const [runwayModel, setRunwayModel] = useState<RunwayModel>('gen4.5');
   const [durationSec, setDurationSec] = useState<number>(VIDEO_ENGINES_CONFIG.grok.defaultDuration);
   const { personaOptions } = usePersonaOptions(user);
@@ -187,8 +75,6 @@ export default function VideoPage() {
   const [directorPlan, setDirectorPlan] = useState<DirectorPlanPayload | null>(null);
   const [selected, setSelected] = useState<SelectedAssets>({
     selectedPersona: null,
-    voicePersonaId: null,
-    voicePersonaName: null,
     imageFile: null,
     imagePreview: null,
   });
@@ -205,6 +91,7 @@ export default function VideoPage() {
   const [characterPersonas, setCharacterPersonas] = useState<Record<string, PersonaOption | null>>({});
   const [isFaceSwapping, setIsFaceSwapping] = useState(false);
   const [faceSwapSuccess, setFaceSwapSuccess] = useState(false);
+  const [, setFaceSwapError] = useState('');
   const [detectedCharacters, setDetectedCharacters] = useState<string[]>([]);
   const [lastGenerationParams, setLastGenerationParams] = useState<any>(null);
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null);
@@ -218,7 +105,6 @@ export default function VideoPage() {
     engine: true, // Video Motoru açık
     faceSwap: false,
     visualPersona: false,
-    voicePersona: false,
     uploadImage: false,
   });
   
@@ -226,29 +112,17 @@ export default function VideoPage() {
     setOpenSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const voiceOptions = useMemo(
-    () => [
-      { id: 'voice-1', name: 'Studio Voice' },
-      { id: 'voice-2', name: 'Narrator Voice' },
-      { id: 'voice-3', name: 'Warm Voice' },
-    ],
-    []
-  );
-
-  useEffect(() => {
-    console.log('✅ STATE UPDATED: Selected Persona is now:', selected.selectedPersona);
-  }, [selected.selectedPersona]);
-
   useEffect(() => {
     const cfg = VIDEO_ENGINES_CONFIG[selectedEngine];
     if (cfg.mode === 'auto' || cfg.supportedDurations.length === 0) {
       setDurationSec(0);
-      return;
-    }
-    if (!cfg.supportedDurations.includes(durationSec)) {
+    } else if (!cfg.supportedDurations.includes(durationSec)) {
       setDurationSec(cfg.defaultDuration);
     }
-  }, [selectedEngine]); // intentionally not depending on durationSec to avoid loops
+    if (!cfg.supportedQualities.includes(selectedQuality)) {
+      setSelectedQuality(cfg.defaultQuality);
+    }
+  }, [selectedEngine, durationSec, selectedQuality]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -282,15 +156,6 @@ export default function VideoPage() {
       setIsMenuOpen(false);
     };
 
-  const handleSelectVoice = (option: PersonaOption) => {
-    setSelected(prev => ({
-      ...prev,
-      voicePersonaId: option.id,
-      voicePersonaName: option.name,
-    }));
-    setIsMenuOpen(false);
-  };
-
   const handleImagePick = (file: File | null) => {
     if (!file) return;
     const preview = URL.createObjectURL(file);
@@ -304,12 +169,7 @@ export default function VideoPage() {
     setIsMenuOpen(false);
     const runUpload = async () => {
       try {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(new Error('Failed to read image file.'));
-          reader.readAsDataURL(file);
-        });
+        const dataUrl = await fileToDataUrl(file);
         const response = await fetch('/api/upload-image', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -345,14 +205,10 @@ export default function VideoPage() {
       if (key === 'selectedPersona') {
         return { ...prev, selectedPersona: null };
       }
-      if (key === 'voicePersonaId' || key === 'voicePersonaName') {
-        return { ...prev, voicePersonaId: null, voicePersonaName: null };
-      }
       return prev;
     });
   };
 
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const fetchWithTimeout = async (input: RequestInfo, init?: RequestInit, timeoutMs = 300000) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -362,89 +218,32 @@ export default function VideoPage() {
       clearTimeout(timeoutId);
     }
   };
+  const pollingActions = useMemo(() => ({
+    setStatusMessage,
+    setVideoUrl,
+    setHasGenerated,
+    setAudioMerged,
+    setIsGenerating,
+    setPendingVideoId,
+    setOriginalVideoUrl,
+    setFaceSwapSuccess,
+    setFaceSwapError,
+    setGeneratedImageUrl,
+    setErrorMessage,
+  }), []);
 
-  useEffect(() => {
-    if (!pendingVideoId) return;
-    let cancelled = false;
-    const runId = pendingRunIdRef.current;
-
-    const pollOnce = async () => {
-      if (cancelled) return;
-      if (generationRunRef.current !== runId) return;
-
-      try {
-        // Runway: use dedicated status endpoint + premium message.
-        if (pendingVideoId.startsWith('runway:')) {
-          setStatusMessage('Gen-4.5 Motoru işliyor... Ultra Gerçekçi Video Hazırlanıyor');
-          const taskId = pendingVideoId.slice('runway:'.length);
-          const res = await fetch(`/api/video/runway-gen4/status?task_id=${encodeURIComponent(taskId)}`);
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            throw new Error(data.error || 'Failed to check Runway status');
-          }
-          const st = String(data.status || '').toUpperCase();
-          if (st === 'SUCCEEDED') {
-            if (!data.videoUrl) throw new Error('Runway succeeded but videoUrl is missing');
-            if (generationRunRef.current !== runId) return;
-            setVideoUrl(String(data.videoUrl));
-            setHasGenerated(true);
-            setAudioMerged(false);
-            setIsGenerating(false);
-            setPendingVideoId(null);
-            return;
-          }
-          if (st === 'FAILED') {
-            throw new Error(data.error || 'Runway generation failed');
-          }
-          return;
-        }
-
-        // Default: existing unified status route.
-        const response = await fetch(`/api/generate-video/status?id=${encodeURIComponent(pendingVideoId)}`);
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(data.error || data.details || 'Failed to check video status');
-        }
-        if (data.statusMessage) {
-          setStatusMessage(data.statusMessage);
-        }
-        if (data.status === 'succeeded') {
-          if (!data.videoUrl) {
-            throw new Error('Video generated but URL is missing');
-          }
-          if (generationRunRef.current !== runId) return;
-          setVideoUrl(String(data.videoUrl));
-          setHasGenerated(true);
-          setAudioMerged(Boolean(data.audioMerged));
-          setIsGenerating(false);
-          setPendingVideoId(null);
-          return;
-        }
-        if (data.status === 'failed' || data.status === 'canceled') {
-          throw new Error(data.error || 'Video generation failed');
-        }
-      } catch (error: any) {
-        if (generationRunRef.current !== runId) return;
-        setErrorMessage(error?.message || 'Failed to generate video');
-        setIsGenerating(false);
-        setPendingVideoId(null);
-      }
-    };
-
-    pollOnce();
-    const intervalId = window.setInterval(pollOnce, 4000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [pendingVideoId]);
+  useVideoGenerationPolling({
+    pendingVideoId,
+    generationRunRef,
+    pendingRunIdRef,
+    actions: pollingActions,
+  });
 
   const handleGenerate = async (e?: React.MouseEvent<HTMLButtonElement>) => {
     if (e) e.preventDefault();
     if (!prompt.trim() || isGenerating) return;
     const targetId = selectedIdRef.current || selected.selectedPersona?.id;
     const exactPersona = personaOptions.find(option => option.id === targetId);
-    console.log('🕵️ DEBUGGING PERSONA:', exactPersona);
     const finalModelId = (exactPersona as any)?.model_id
       || (exactPersona as any)?.modelId
       || (exactPersona as any)?.training_id
@@ -452,6 +251,15 @@ export default function VideoPage() {
       || (exactPersona as any)?.replicate_model_id;
     const finalImageUrl = exactPersona?.image_url
       || exactPersona?.imageUrl
+      || '';
+    const finalDestinationModel = (exactPersona as any)?.destination_model
+      || (exactPersona as any)?.destinationModel
+      || '';
+    const finalModelFamily = (exactPersona as any)?.model_family
+      || (exactPersona as any)?.modelFamily
+      || '';
+    const finalTrainingBaseModel = (exactPersona as any)?.training_base_model
+      || (exactPersona as any)?.trainingBaseModel
       || '';
     const finalTrigger = exactPersona
       ? (exactPersona as any)?.trigger_word
@@ -461,8 +269,6 @@ export default function VideoPage() {
       alert(`⚠️ HATA: Model ID Eksik!\nID: ${targetId}\nDurum: ${exactPersona ? 'Bulundu' : 'Yok'}`);
       return;
     }
-    console.log('🚀 GENERATING WITH:', exactPersona);
-    console.log('🚀 DEBUG: Sending Persona URL:', finalImageUrl);
     if (selected.imageFile && (isUploadingImage || !uploadedImageUrl)) {
       alert('Please wait for image upload to finish.');
       return;
@@ -483,6 +289,7 @@ export default function VideoPage() {
     const resolvedPrompt = exactPersona
       ? `${resolvedTriggerWord} ${prompt.trim()}`.trim()
       : prompt.trim();
+    let handedOffToPolling = false;
     try {
       setStatusMessage('Generating video + voice...');
       const videoResponse = await fetchWithTimeout('/api/generate-video', {
@@ -496,6 +303,9 @@ export default function VideoPage() {
           personaUrl: finalImageUrl,
           personaModelId: finalModelId,
           personaTriggerWord: finalTrigger,
+          destinationModel: finalDestinationModel || undefined,
+          modelFamily: finalModelFamily || undefined,
+          trainingBaseModel: finalTrainingBaseModel || undefined,
           persona: exactPersona,
           isTextOnly: true,
           personaMode: exactPersona ? 'persona' : 'generic',
@@ -506,6 +316,7 @@ export default function VideoPage() {
           triggerWord: exactPersona ? resolvedTriggerWord : undefined,
           trigger_word: exactPersona ? resolvedTriggerWord : undefined,
           engine: selectedEngine,
+          qualityPreset: selectedQuality,
           runwayModel: selectedEngine === 'runway' ? runwayModel : undefined,
           // Face swap gated by public flag + premium + explicit consent
           enableFaceSwap: faceSwapAllowedForUser && enableFaceSwap && faceSwapConsent && Object.keys(actorPhotoUrls).length > 0,
@@ -515,6 +326,7 @@ export default function VideoPage() {
           ) : undefined,
           detectedCharacters: faceSwapAllowedForUser && enableFaceSwap && faceSwapConsent && Object.keys(actorPhotoUrls).length > 0 ? detectedCharacters : undefined,
           user,
+          async: true,
         }),
       });
       const videoData = await videoResponse.json().catch(() => ({}));
@@ -529,6 +341,7 @@ export default function VideoPage() {
         if (!videoData.videoId) {
           throw new Error('Video generation did not return an ID');
         }
+        handedOffToPolling = true;
         pendingRunIdRef.current = currentRun;
         setPendingVideoId(String(videoData.videoId));
         // Keep spinner on; status polling effect will resolve.
@@ -548,7 +361,6 @@ export default function VideoPage() {
         setOriginalVideoUrl(originalVideoUrlFromBackend);
         setFaceSwapSuccess(true);
         setTimeout(() => setFaceSwapSuccess(false), 3000);
-        console.log('✅ Face swap completed successfully');
       } else if (enableFaceSwap && Object.keys(actorPhotoUrls).length > 0) {
         if (!faceSwapped) {
           // Face swap was requested but backend didn't apply it
@@ -574,6 +386,9 @@ export default function VideoPage() {
         personaUrl: finalImageUrl,
         personaModelId: finalModelId,
         personaTriggerWord: finalTrigger,
+        destinationModel: finalDestinationModel || undefined,
+        modelFamily: finalModelFamily || undefined,
+        trainingBaseModel: finalTrainingBaseModel || undefined,
         persona: exactPersona,
         isTextOnly: true,
         personaMode: exactPersona ? 'persona' : 'generic',
@@ -583,6 +398,7 @@ export default function VideoPage() {
         model_id: finalModelId,
         triggerWord: exactPersona ? resolvedTriggerWord : undefined,
         trigger_word: exactPersona ? resolvedTriggerWord : undefined,
+        qualityPreset: selectedQuality,
         user,
       });
       
@@ -593,7 +409,7 @@ export default function VideoPage() {
       if (generationRunRef.current !== currentRun) return;
       setErrorMessage(error.message || 'Failed to generate video');
     } finally {
-      if (generationRunRef.current === currentRun) {
+      if (generationRunRef.current === currentRun && !handedOffToPolling) {
         setIsGenerating(false);
       }
     }
@@ -675,10 +491,17 @@ export default function VideoPage() {
   );
 
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="min-h-screen bg-black text-white relative">
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
-      <main className="ml-64 px-6 py-10">
-        <div className="mx-auto max-w-4xl">
+      <main className="ml-64 px-6 py-10 relative">
+        {/* Background ambient glow when generating */}
+        {isGenerating && (
+          <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
+            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-[100px] animate-pulse"></div>
+            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-[100px] animate-[pulse_3s_ease-in-out_infinite]"></div>
+          </div>
+        )}
+        <div className="mx-auto max-w-4xl relative z-10">
           <header className="text-center mb-10">
             <h1 className="text-4xl font-bold">AI Video Factory</h1>
             <p className="text-gray-400 mt-3">
@@ -706,18 +529,6 @@ export default function VideoPage() {
                     type="button"
                     onClick={() => removeChip('selectedPersona')}
                     className="rounded-full bg-blue-500/30 p-1 hover:bg-blue-500/40"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              )}
-              {selected.voicePersonaId && (
-                <span className="inline-flex items-center gap-2 rounded-full bg-purple-500/20 px-3 py-1 text-sm text-purple-200">
-                  🗣️ {selected.voicePersonaName ?? 'Voice Persona'}
-                  <button
-                    type="button"
-                    onClick={() => removeChip('voicePersonaId')}
-                    className="rounded-full bg-purple-500/30 p-1 hover:bg-purple-500/40"
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -783,11 +594,26 @@ export default function VideoPage() {
               )}
 
               {isGenerating && (
-                <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-white/10 bg-gradient-to-br from-white/5 via-black/40 to-black/70 px-6 py-10">
-                  <div className="aspect-video w-full overflow-hidden rounded-xl border border-white/10 bg-black/60 shadow-[0_0_35px_rgba(255,255,255,0.06)]">
-                    <div className="flex h-full w-full flex-col items-center justify-center gap-3 animate-pulse">
-                      <Loader2 className="h-6 w-6 animate-spin text-white/70" />
-                      <p className="text-sm text-gray-300">{statusMessage}</p>
+                <div className="flex flex-col items-center justify-center gap-6 rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 via-black/60 to-[#0b0b0b] px-6 py-20 shadow-[0_0_50px_rgba(124,58,237,0.1)] relative overflow-hidden min-h-[400px]">
+                  {/* Animated Background Glow */}
+                  <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 opacity-50 blur-3xl animate-pulse pointer-events-none"></div>
+                  
+                  {/* Progress Indicator */}
+                  <div className="relative z-10 flex flex-col items-center gap-8 w-full max-w-md">
+                    <div className="relative flex h-32 w-32 items-center justify-center rounded-full bg-black/50 border border-white/10 shadow-[0_0_40px_rgba(124,58,237,0.2)]">
+                      <div className="absolute inset-0 rounded-full border-t-4 border-r-4 border-blue-400 animate-spin"></div>
+                      <div className="absolute inset-3 rounded-full border-b-4 border-l-4 border-purple-400 animate-[spin_1.5s_linear_infinite_reverse]"></div>
+                      <div className="absolute inset-6 rounded-full border-t-4 border-l-4 border-pink-400 animate-[spin_2s_linear_infinite]"></div>
+                      <Loader2 className="h-10 w-10 animate-pulse text-white" />
+                    </div>
+                    
+                    <div className="flex flex-col items-center gap-3 text-center w-full">
+                      <h3 className="text-2xl font-bold text-white tracking-wide">Video Üretiliyor</h3>
+                      <div className="h-2 w-full bg-white/10 rounded-full overflow-hidden mt-2 relative">
+                        <div className="absolute top-0 left-0 h-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 w-1/2 animate-[shimmer_2s_infinite] bg-[length:200%_100%] rounded-full"></div>
+                      </div>
+                      <p className="text-base font-medium text-blue-300 mt-2 animate-pulse">{statusMessage || 'Motorlar ısınıyor...'}</p>
+                      <p className="text-sm text-gray-400 mt-1">Bu işlem seçilen motora göre 1-5 dakika sürebilir. Lütfen bekleyin.</p>
                     </div>
                   </div>
                 </div>
@@ -1028,6 +854,32 @@ export default function VideoPage() {
                         );
                       })()}
                     </div>
+
+                    {/* Quality */}
+                    <div className="px-4 pb-4">
+                      <div className="mb-2 text-xs font-medium text-gray-400">Kalite</div>
+                      <div className="grid grid-cols-1 gap-2">
+                        {VIDEO_ENGINES_CONFIG[selectedEngine].supportedQualities.map((q) => {
+                          const meta = VIDEO_QUALITY_PRESET_LABELS[q];
+                          const active = selectedQuality === q;
+                          return (
+                            <button
+                              key={q}
+                              type="button"
+                              onClick={() => setSelectedQuality(q)}
+                              className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+                                active
+                                  ? 'border-white/30 bg-white/10 text-white'
+                                  : 'border-white/10 bg-white/5 text-gray-300 hover:bg-white/10'
+                              }`}
+                            >
+                              <div className="text-xs font-medium">{meta.title}</div>
+                              <div className="text-[11px] text-gray-400">{meta.hint}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                   
                   {/* Face Swap Section - Accordion */}
@@ -1090,7 +942,7 @@ export default function VideoPage() {
                           detectedCharacters.map((character) => {
                             const selectedPersona = characterPersonas[character];
                             const hasPhoto = !!actorPhotoUrls[character] && !selectedPersona;
-                            const usePersona = !!selectedPersona;
+                            const hasSelectedPersona = !!selectedPersona;
                             
                             return (
                               <div key={character} className="space-y-2 rounded-lg border border-white/10 bg-black/40 p-2">
@@ -1179,9 +1031,9 @@ export default function VideoPage() {
                                 </div>
                                 
                                 {/* Seçim Onayı */}
-                                {(usePersona || hasPhoto) && (
+                                {(hasSelectedPersona || hasPhoto) && (
                                   <p className="text-[10px] text-gray-500">
-                                    {usePersona ? `✓ Persona: ${selectedPersona?.name}` : '✓ Fotoğraf yüklendi'}
+                                    {hasSelectedPersona ? `✓ Persona: ${selectedPersona?.name}` : '✓ Fotoğraf yüklendi'}
                                   </p>
                                 )}
                               </div>
@@ -1258,38 +1110,6 @@ export default function VideoPage() {
                                 {option.status || 'training'}
                               </span>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Voice Persona - Accordion */}
-                  <div className="border-b border-white/10">
-                    <button
-                      type="button"
-                      onClick={() => toggleSection('voicePersona')}
-                      className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-white hover:bg-white/5 transition-colors"
-                    >
-                      <span>🗣️ Voice Persona</span>
-                      {openSections.voicePersona ? (
-                        <ChevronUp className="h-4 w-4 text-gray-400" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4 text-gray-400" />
-                      )}
-                    </button>
-                    {openSections.voicePersona && (
-                      <div className="px-4 pb-3">
-                        <div className="max-h-32 overflow-auto rounded-lg border border-white/10 bg-black/40">
-                          {voiceOptions.map((option) => (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => handleSelectVoice(option)}
-                              className="block w-full px-3 py-2 text-left text-sm text-white hover:bg-white/10"
-                            >
-                              {option.name}
-                            </button>
                           ))}
                         </div>
                       </div>

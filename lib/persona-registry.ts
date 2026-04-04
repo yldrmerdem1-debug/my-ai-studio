@@ -1,8 +1,16 @@
 import fs from 'fs/promises';
 import path from 'path';
 
-export type PersonaTrainingStatus = 'training' | 'completed' | 'failed';
+import type { PersonaSubjectType } from '@/lib/persona-subject';
+
+export type PersonaTrainingStatus = 'training' | 'completed' | 'failed' | 'canceled';
 export type PersonaStatus = 'none' | 'training' | 'ready';
+
+export type PersonaReferenceImage = {
+  url: string;
+  storagePath?: string;
+  name?: string;
+};
 
 export type PersonaRecord = {
   personaId: string;
@@ -10,6 +18,8 @@ export type PersonaRecord = {
   name?: string;
   triggerWord?: string;
   gender?: 'male' | 'female';
+  subjectType?: PersonaSubjectType;
+  modelFamily?: 'flux-lora';
   /**
    * Optional Hugging Face URL for LoRA weights (e.g. a .safetensors file or repo reference).
    * Keep this as a URL/path string; never store base64 blobs here.
@@ -23,11 +33,15 @@ export type PersonaRecord = {
   trainingId?: string;
   trainingZipUrl?: string;
   trainingZipPath?: string;
+  trainingZipStoragePath?: string;
   imageUrl?: string;
   storagePath?: string;
+  referenceImages?: PersonaReferenceImage[];
+  referenceImageCount?: number;
   status?: PersonaTrainingStatus;
   weightsUrl?: string;
   destinationModel?: string;
+  trainingBaseModel?: string;
   errorMessage?: string;
   createdAt?: string;
   completedAt?: string;
@@ -201,9 +215,110 @@ export async function writePersonas(personas: PersonaRecord[]) {
   await fs.rename(tempPath, PERSONAS_DB_PATH);
 }
 
-export async function findPersonaById(personaId: string): Promise<PersonaRecord | undefined> {
+const safeIdentifier = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const collectPersonaIdentifiers = (persona: PersonaRecord) =>
+  [
+    safeIdentifier(persona.personaId),
+    safeIdentifier(persona.trainingId),
+    safeIdentifier(persona.modelId),
+  ].filter(Boolean);
+
+const matchesPersonaIdentifier = (persona: PersonaRecord, identifier: string) => {
+  const target = safeIdentifier(identifier);
+  if (!target) return false;
+  return collectPersonaIdentifiers(persona).includes(target);
+};
+
+const personaStatusRank = (status?: string) => {
+  switch (String(status || '').toLowerCase()) {
+    case 'completed':
+    case 'active':
+      return 4;
+    case 'failed':
+    case 'canceled':
+      return 3;
+    case 'training':
+      return 2;
+    default:
+      return 1;
+  }
+};
+
+const personaTimestamp = (persona: PersonaRecord) => {
+  const raw = persona.completedAt || persona.createdAt || '';
+  const value = raw ? new Date(raw).getTime() : 0;
+  return Number.isNaN(value) ? 0 : value;
+};
+
+export async function findRelatedPersonas(identifier: string): Promise<PersonaRecord[]> {
+  const target = safeIdentifier(identifier);
+  if (!target) return [];
+
   const personas = await readPersonas();
-  return personas.find(persona => persona.personaId === personaId);
+  const directMatches = personas.filter((persona) => matchesPersonaIdentifier(persona, target));
+  if (directMatches.length === 0) return [];
+
+  const relatedIdentifiers = new Set<string>();
+  for (const persona of directMatches) {
+    for (const value of collectPersonaIdentifiers(persona)) {
+      relatedIdentifiers.add(value);
+    }
+  }
+
+  return personas.filter((persona) =>
+    collectPersonaIdentifiers(persona).some((value) => relatedIdentifiers.has(value))
+  );
+}
+
+export async function findPersonaById(personaId: string): Promise<PersonaRecord | undefined> {
+  const target = safeIdentifier(personaId);
+  const matches = await findRelatedPersonas(target);
+  if (matches.length === 0) return undefined;
+
+  return [...matches].sort((left, right) => {
+    const statusDiff = personaStatusRank(right.status) - personaStatusRank(left.status);
+    if (statusDiff !== 0) return statusDiff;
+
+    const exactDiff = Number(matchesPersonaIdentifier(right, target)) - Number(matchesPersonaIdentifier(left, target));
+    if (exactDiff !== 0) return exactDiff;
+
+    return personaTimestamp(right) - personaTimestamp(left);
+  })[0];
+}
+
+export async function updatePersonasById(
+  identifier: string,
+  updates: Partial<PersonaRecord> | ((persona: PersonaRecord) => Partial<PersonaRecord>)
+) {
+  const target = safeIdentifier(identifier);
+  if (!target) return 0;
+
+  const personas = await readPersonas();
+  const directMatches = personas.filter((persona) => matchesPersonaIdentifier(persona, target));
+  if (directMatches.length === 0) return 0;
+
+  const relatedIdentifiers = new Set<string>();
+  for (const persona of directMatches) {
+    for (const value of collectPersonaIdentifiers(persona)) {
+      relatedIdentifiers.add(value);
+    }
+  }
+
+  let updatedCount = 0;
+  const next = personas.map((persona) => {
+    const isRelated = collectPersonaIdentifiers(persona).some((value) => relatedIdentifiers.has(value));
+    if (!isRelated) return persona;
+    updatedCount += 1;
+    const patch = typeof updates === 'function' ? updates(persona) : updates;
+    return { ...persona, ...patch };
+  });
+
+  if (updatedCount > 0) {
+    await writePersonas(next);
+  }
+
+  return updatedCount;
 }
 
 export async function upsertPersona(record: PersonaRecord) {

@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 
 import { MODELS, ModelKey } from '@/config/models';
 import HuggingFaceService from '@/lib/huggingface-service';
+import { normalizeLoraWeightsBuffer } from '@/lib/lora-weights';
 import { downloadMediaWithValidation } from '@/lib/replicate-media';
 
 type Provider = 'replicate' | 'fal';
@@ -85,12 +86,13 @@ async function downloadToTempFile(url: string, options: { suggestedName: string;
       warn: (...args) => console.warn(...args),
     },
   });
-  const extFromName = path.extname(options.suggestedName || '').replace('.', '').trim().toLowerCase();
-  const ext =
-    extFromName
-    || (media.contentType?.includes('zip') ? 'zip' : media.contentType?.includes('json') ? 'json' : 'safetensors');
+  const normalizedWeights = normalizeLoraWeightsBuffer(media.buffer, `${options.suggestedName} ${url}`);
+  if (normalizedWeights.kind !== 'safetensors') {
+    throw new Error('LoRA weights could not be normalized to safetensors.');
+  }
+  const ext = normalizedWeights.extension;
   const tempPath = path.join(os.tmpdir(), `${path.parse(options.suggestedName).name || 'asset'}-${Date.now()}.${ext}`);
-  await fs.writeFile(tempPath, media.buffer);
+  await fs.writeFile(tempPath, normalizedWeights.buffer);
   return tempPath;
 }
 
@@ -131,7 +133,7 @@ async function waitForReplicateProcessingGate(replicate: Replicate, id: string, 
 }
 
 /**
- * Train persona LoRA with Replicate first; if queue is stuck/error within 30s gate, fallback to fal.ai training.
+ * Train persona LoRA with Replicate first; if queue is stuck/error within 30s gate, fallback to fal.ai portrait training.
  * Returns a Hugging Face resolve URL for the resulting weights.
  */
 export async function trainPersonaFallback(imagesZipUrl: string, triggerWord: string): Promise<{ huggingFaceUrl: string; provider: Provider; raw: unknown }> {
@@ -210,12 +212,22 @@ export async function trainPersonaFallback(imagesZipUrl: string, triggerWord: st
   try {
     ensureFalConfigured();
     console.log(`${ANSI.cyan}🚀 Fal.ai LoRA training deneniyor...${ANSI.reset}`, cfg.fal.model);
+    const falTrainingInput = cfg.fal.model.includes('flux-lora-portrait-trainer')
+      ? {
+          images_data_url: zipUrl,
+          trigger_phrase: trig,
+          steps: 2200,
+          multiresolution_training: true,
+          subject_crop: true,
+          create_masks: false,
+        }
+      : {
+          images_data_url: zipUrl,
+          trigger_word: trig,
+          steps: 1000,
+        };
     const result = await fal.subscribe(cfg.fal.model, {
-      input: {
-        images_data_url: zipUrl,
-        trigger_word: trig,
-        steps: 1000,
-      } as any,
+      input: falTrainingInput as any,
       logs: true,
       onQueueUpdate: (update: any) => {
         const st = update?.status || update?.type || 'update';

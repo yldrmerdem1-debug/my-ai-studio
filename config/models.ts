@@ -117,7 +117,7 @@ export const MODELS = {
       version: null,
     },
     fal: {
-      model: 'fal-ai/flux-lora-fast-training',
+      model: 'fal-ai/flux-lora-portrait-trainer',
     },
   },
 

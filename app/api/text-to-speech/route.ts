@@ -1,12 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
-import crypto from 'node:crypto';
 import { requirePersonaAccess } from '@/lib/persona-guards';
 import { createGeminiModel, getGeminiModelId, resolveGeminiModelId } from '@/lib/gemini';
+import { persistGeneratedBuffer } from '@/lib/generated-assets';
 
 let geminiTtsDisabled = false;
 const geminiModelId = resolveGeminiModelId(
@@ -165,20 +160,18 @@ export async function POST(request: NextRequest) {
 
     // Get audio blob
     const audioBlob = await response.blob();
-    
+
     const audioMime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
     const extension = format === 'wav' ? 'wav' : 'mp3';
-    const dir = path.join(process.cwd(), 'public', 'tts');
-    await mkdir(dir, { recursive: true });
-    const fileName = `${crypto.randomUUID()}.${extension}`;
-    const filePath = path.join(dir, fileName);
-    await pipeline(Readable.fromWeb(audioBlob.stream() as any), createWriteStream(filePath));
-
-    // Convert blob to base64 for client-side use
     const arrayBuffer = await audioBlob.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString('base64');
+    const audioBuffer = Buffer.from(arrayBuffer);
+    const base64 = audioBuffer.toString('base64');
     const audioUrl = `data:${audioMime};base64,${base64}`;
-    const audioFileUrl = `/tts/${fileName}`;
+    const audioFileUrl = await persistGeneratedBuffer(audioBuffer, {
+      prefix: 'generated/audio',
+      suggestedName: `tts.${extension}`,
+      contentType: audioMime,
+    });
 
     console.log('Text-to-speech conversion successful');
 

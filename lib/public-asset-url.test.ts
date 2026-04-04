@@ -20,7 +20,7 @@ const withFetchMock = async (
     if (!route) {
       return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
     }
-    return new Response(route.body, {
+    return new Response(typeof route.body === 'string' ? route.body : Buffer.from(route.body), {
       status: route.status,
       headers: { 'content-type': route.contentType },
     });

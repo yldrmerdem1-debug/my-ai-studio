@@ -104,7 +104,36 @@ const collectUrlCandidates = (value: unknown, path = 'root', out: UrlCandidate[]
     return out;
   }
   if (value && typeof value === 'object') {
-    Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
+    const obj = value as Record<string, unknown> & {
+      url?: unknown;
+      href?: unknown;
+      toString?: () => string;
+    };
+    const pushMaybeUrl = (candidate: unknown, candidatePath: string) => {
+      const resolved = toHttpUrlOrNull(candidate);
+      if (resolved) out.push({ url: resolved, path: candidatePath });
+    };
+    pushMaybeUrl(obj.href, `${path}.href`);
+    if (typeof obj.url === 'function') {
+      try {
+        pushMaybeUrl((obj.url as () => unknown)(), `${path}.url()`);
+      } catch {
+        // ignore callable URL access failures
+      }
+    } else {
+      pushMaybeUrl(obj.url, `${path}.url`);
+    }
+    if (typeof obj.toString === 'function') {
+      try {
+        const stringified = obj.toString();
+        if (typeof stringified === 'string' && HTTP_RE.test(stringified)) {
+          out.push({ url: stringified, path: `${path}.toString()` });
+        }
+      } catch {
+        // ignore custom toString failures
+      }
+    }
+    Object.entries(obj).forEach(([key, entry]) => {
       collectUrlCandidates(entry, `${path}.${key}`, out);
     });
   }
