@@ -42,3 +42,8 @@ next-env.d.ts
 
 # usage logs (optional local)
 data/video-usage.jsonl
+
+# runtime persona data and generated media
+data/personas.json
+data/personas.tmp-*.json
+public/generated/**
