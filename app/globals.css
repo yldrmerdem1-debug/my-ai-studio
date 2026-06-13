@@ -201,6 +201,12 @@ body {
   background: rgba(0, 217, 255, 0.5);
 }
 
+/* Brand-colored text selection */
+::selection {
+  background: rgba(0, 217, 255, 0.28);
+  color: #ffffff;
+}
+
 /* Engine Logo Cards - Optimized Hover Effects */
 .engine-logo-card {
   transition: box-shadow 0.3s ease-in-out, border-color 0.3s ease-in-out, background-color 0.3s ease-in-out, transform 0.3s ease-in-out;
@@ -763,5 +769,201 @@ a,
   }
   50% {
     box-shadow: 0 0 70px rgba(0, 217, 255, 0.9), 0 0 140px rgba(0, 153, 255, 0.6), inset 0 0 40px rgba(255, 255, 255, 0.2);
+  }
+}
+
+/* Ambient aurora background for premium app pages */
+@keyframes aurora-drift-a {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  33%  { transform: translate3d(8%, 6%, 0) scale(1.12); }
+  66%  { transform: translate3d(-6%, 10%, 0) scale(0.95); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes aurora-drift-b {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  33%  { transform: translate3d(-10%, -8%, 0) scale(1.08); }
+  66%  { transform: translate3d(7%, -5%, 0) scale(1.15); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes aurora-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.aurora-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: #000005;
+}
+
+.aurora-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.55;
+  will-change: transform;
+}
+
+.aurora-orb--cyan {
+  top: -12%;
+  left: -8%;
+  width: 46vw;
+  height: 46vw;
+  background: radial-gradient(circle at 30% 30%, rgba(34, 211, 238, 0.55), transparent 65%);
+  animation: aurora-drift-a 18s ease-in-out infinite;
+}
+
+.aurora-orb--violet {
+  bottom: -18%;
+  right: -10%;
+  width: 52vw;
+  height: 52vw;
+  background: radial-gradient(circle at 60% 40%, rgba(139, 92, 246, 0.5), transparent 65%);
+  animation: aurora-drift-b 22s ease-in-out infinite;
+}
+
+.aurora-orb--pink {
+  top: 30%;
+  right: 24%;
+  width: 30vw;
+  height: 30vw;
+  background: radial-gradient(circle at 50% 50%, rgba(244, 114, 182, 0.35), transparent 65%);
+  animation: aurora-drift-a 26s ease-in-out infinite reverse;
+}
+
+.aurora-sweep {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 140vw;
+  height: 140vw;
+  margin-top: -70vw;
+  margin-left: -70vw;
+  background: conic-gradient(from 0deg, transparent 0deg, rgba(0, 217, 255, 0.06) 60deg, transparent 140deg, rgba(139, 92, 246, 0.06) 220deg, transparent 320deg);
+  animation: aurora-spin 40s linear infinite;
+  opacity: 0.7;
+}
+
+.aurora-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.5) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.06;
+  mask-image: radial-gradient(circle at 50% 35%, black, transparent 70%);
+  -webkit-mask-image: radial-gradient(circle at 50% 35%, black, transparent 70%);
+}
+
+.aurora-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 30%, transparent 35%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/* Hero showcase: auto before/after crossfade to show "same identity, new scene". */
+@keyframes hero-beforeafter {
+  0%, 42% { opacity: 1; }
+  50%, 92% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+.hero-beforeafter-top {
+  animation: hero-beforeafter 7s ease-in-out infinite;
+}
+
+/* Gentle float for showcase tiles */
+@keyframes hero-float {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -10px, 0); }
+}
+
+.hero-float-a { animation: hero-float 6s ease-in-out infinite; }
+.hero-float-b { animation: hero-float 7.5s ease-in-out infinite; }
+.hero-float-c { animation: hero-float 8.5s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-beforeafter-top,
+  .hero-float-a,
+  .hero-float-b,
+  .hero-float-c {
+    animation: none;
+  }
+}
+
+/* Tiled starfield layers: pure gradients, no images, GPU-cheap. */
+@keyframes aurora-twinkle {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.7; }
+}
+
+.aurora-stars,
+.aurora-stars--far {
+  position: absolute;
+  inset: 0;
+  background-repeat: repeat;
+  mask-image: radial-gradient(ellipse at 50% 35%, black 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 35%, black 30%, transparent 75%);
+}
+
+.aurora-stars {
+  background-image:
+    radial-gradient(1.5px 1.5px at 22px 34px, rgba(255, 255, 255, 0.9), transparent 100%),
+    radial-gradient(1px 1px at 118px 92px, rgba(186, 230, 253, 0.8), transparent 100%),
+    radial-gradient(1.5px 1.5px at 196px 158px, rgba(255, 255, 255, 0.7), transparent 100%),
+    radial-gradient(1px 1px at 64px 188px, rgba(221, 214, 254, 0.75), transparent 100%);
+  background-size: 240px 240px;
+  animation: aurora-twinkle 5s ease-in-out infinite;
+}
+
+.aurora-stars--far {
+  background-image:
+    radial-gradient(1px 1px at 48px 12px, rgba(255, 255, 255, 0.5), transparent 100%),
+    radial-gradient(1px 1px at 150px 70px, rgba(165, 243, 252, 0.45), transparent 100%),
+    radial-gradient(0.8px 0.8px at 90px 130px, rgba(255, 255, 255, 0.4), transparent 100%);
+  background-size: 180px 180px;
+  animation: aurora-twinkle 8s ease-in-out infinite reverse;
+}
+
+/* Occasional shooting-light streak across the upper sky */
+@keyframes aurora-comet {
+  0%, 92% {
+    transform: translate3d(-15vw, -10vh, 0) rotate(-18deg);
+    opacity: 0;
+  }
+  94% { opacity: 0.9; }
+  100% {
+    transform: translate3d(115vw, 28vh, 0) rotate(-18deg);
+    opacity: 0;
+  }
+}
+
+.aurora-comet {
+  position: absolute;
+  top: 14%;
+  left: 0;
+  width: 180px;
+  height: 1.5px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.9), rgba(255, 255, 255, 0.95));
+  box-shadow: 0 0 12px rgba(125, 211, 252, 0.6);
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: aurora-comet 14s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora-orb,
+  .aurora-sweep,
+  .aurora-stars,
+  .aurora-stars--far,
+  .aurora-comet {
+    animation: none;
   }
 }

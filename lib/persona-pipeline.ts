@@ -4,6 +4,7 @@ export type PersonaTrainingProvider = 'fal' | 'replicate';
 
 export type PersonaTrainingEngineId =
   | 'flux-lora-portrait-trainer'
+  | 'flux-lora-fast-training'
   | 'flux-dev-lora-trainer';
 
 export type PersonaImageEngineId =
@@ -11,7 +12,10 @@ export type PersonaImageEngineId =
   | 'flux-dev-lora'
   | 'flux-kontext-lora'
   | 'flux-kontext-pro'
-  | 'flux-2-max';
+  | 'flux-2-max'
+  | 'nano-banana'
+  | 'nano-banana-2'
+  | 'nano-banana-pro';
 
 export type PersonaGenerationMode = 'creative' | 'exact';
 
@@ -42,6 +46,8 @@ export type PersonaImageEngineOption = {
 
 export const FAL_PORTRAIT_TRAINING_MODEL = 'fal-ai/flux-lora-portrait-trainer';
 export const FAL_PORTRAIT_TRAINING_ENGINE_LABEL = 'FLUX LoRA Portrait Trainer';
+export const FAL_FAST_TRAINING_MODEL = 'fal-ai/flux-lora-fast-training';
+export const FAL_FAST_TRAINING_ENGINE_LABEL = 'FLUX LoRA Fast Training';
 export const REPLICATE_FLUX_TRAINING_MODEL = 'ostris/flux-dev-lora-trainer';
 export const REPLICATE_FLUX_TRAINING_ENGINE_LABEL = 'Replicate FLUX Dev LoRA Trainer';
 
@@ -51,7 +57,7 @@ const TRAINING_PROFILES: Record<PersonaSubjectType, PersonaTrainingProfile> = {
     subjectLabel: 'Human',
     engineId: 'flux-lora-portrait-trainer',
     engineLabel: FAL_PORTRAIT_TRAINING_ENGINE_LABEL,
-    engineDescription: 'Best identity retention for real people and close-up portrait work.',
+    engineDescription: 'Recommended portrait training for strong human identity with a shorter production wait.',
     provider: 'fal',
     modelId: FAL_PORTRAIT_TRAINING_MODEL,
     minImages: 10,
@@ -60,55 +66,55 @@ const TRAINING_PROFILES: Record<PersonaSubjectType, PersonaTrainingProfile> = {
     maxImages: 25,
     referenceImagesMax: 4,
     referenceImagesRecommended: true,
-    defaultSteps: 2200,
+    defaultSteps: 1800,
   },
   animal: {
     subjectType: 'animal',
     subjectLabel: 'Animal',
-    engineId: 'flux-dev-lora-trainer',
-    engineLabel: REPLICATE_FLUX_TRAINING_ENGINE_LABEL,
-    engineDescription: 'Quality-first FLUX trainer for animals when identity fidelity matters more than speed.',
-    provider: 'replicate',
-    modelId: REPLICATE_FLUX_TRAINING_MODEL,
+    engineId: 'flux-lora-fast-training',
+    engineLabel: FAL_FAST_TRAINING_ENGINE_LABEL,
+    engineDescription: 'Fast FLUX LoRA training for recognizable animal identity with Replicate fallback.',
+    provider: 'fal',
+    modelId: FAL_FAST_TRAINING_MODEL,
     minImages: 12,
     recommendedMinImages: 18,
     recommendedMaxImages: 30,
     maxImages: 30,
     referenceImagesMax: 4,
     referenceImagesRecommended: true,
-    defaultSteps: 1400,
+    defaultSteps: 1000,
   },
   product: {
     subjectType: 'product',
     subjectLabel: 'Product / Object',
-    engineId: 'flux-dev-lora-trainer',
-    engineLabel: REPLICATE_FLUX_TRAINING_ENGINE_LABEL,
-    engineDescription: 'Quality-first FLUX trainer for products, packaging, and objects when exact detail matters most.',
-    provider: 'replicate',
-    modelId: REPLICATE_FLUX_TRAINING_MODEL,
+    engineId: 'flux-lora-fast-training',
+    engineLabel: FAL_FAST_TRAINING_ENGINE_LABEL,
+    engineDescription: 'Fast FLUX LoRA training for products and objects with Replicate fallback.',
+    provider: 'fal',
+    modelId: FAL_FAST_TRAINING_MODEL,
     minImages: 12,
     recommendedMinImages: 20,
     recommendedMaxImages: 40,
     maxImages: 40,
     referenceImagesMax: 6,
     referenceImagesRecommended: true,
-    defaultSteps: 1600,
+    defaultSteps: 1000,
   },
   other: {
     subjectType: 'other',
     subjectLabel: 'Other',
-    engineId: 'flux-dev-lora-trainer',
-    engineLabel: REPLICATE_FLUX_TRAINING_ENGINE_LABEL,
-    engineDescription: 'Quality-first FLUX trainer for non-standard subjects when consistency matters more than speed.',
-    provider: 'replicate',
-    modelId: REPLICATE_FLUX_TRAINING_MODEL,
+    engineId: 'flux-lora-fast-training',
+    engineLabel: FAL_FAST_TRAINING_ENGINE_LABEL,
+    engineDescription: 'Fast FLUX LoRA training for custom subjects with Replicate fallback.',
+    provider: 'fal',
+    modelId: FAL_FAST_TRAINING_MODEL,
     minImages: 10,
     recommendedMinImages: 15,
     recommendedMaxImages: 30,
     maxImages: 30,
     referenceImagesMax: 4,
     referenceImagesRecommended: true,
-    defaultSteps: 1400,
+    defaultSteps: 1000,
   },
 };
 
@@ -141,6 +147,27 @@ const IMAGE_ENGINES: Record<Exclude<PersonaImageEngineId, 'auto'>, PersonaImageE
     supportsReferenceImages: false,
     recommendedMode: 'creative',
   },
+  'nano-banana': {
+    id: 'nano-banana',
+    label: 'Nano Banana',
+    description: 'Google Gemini image model. Keeps product/character identity consistent across angles and scenes — no training needed. Great with your own reference photos.',
+    supportsReferenceImages: true,
+    recommendedMode: 'creative',
+  },
+  'nano-banana-2': {
+    id: 'nano-banana-2',
+    label: 'Nano Banana 2',
+    description: 'Latest Gemini image model with up to 4K detail, sharper textures, and stronger prompt following. Best quality for product and brand visuals.',
+    supportsReferenceImages: true,
+    recommendedMode: 'creative',
+  },
+  'nano-banana-pro': {
+    id: 'nano-banana-pro',
+    label: 'Nano Banana Pro',
+    description: 'Gemini 3 Pro Image — studio-grade reasoning model with the strongest character/identity consistency available. Ideal as the final refiner for a digital twin: keeps the exact face while rebuilding scene, lighting, and styling at up to 4K.',
+    supportsReferenceImages: true,
+    recommendedMode: 'creative',
+  },
 };
 
 const IMAGE_ENGINE_ALIASES: Record<string, PersonaImageEngineId> = {
@@ -156,6 +183,18 @@ const IMAGE_ENGINE_ALIASES: Record<string, PersonaImageEngineId> = {
   kontext: 'flux-kontext-pro',
   'flux-2-max': 'flux-2-max',
   'flux 2 max': 'flux-2-max',
+  'nano-banana': 'nano-banana',
+  'nano banana': 'nano-banana',
+  nanobanana: 'nano-banana',
+  'gemini-2.5-flash-image': 'nano-banana',
+  'nano-banana-2': 'nano-banana-2',
+  'nano banana 2': 'nano-banana-2',
+  nanobanana2: 'nano-banana-2',
+  'gemini-3.1-flash-image': 'nano-banana-2',
+  'nano-banana-pro': 'nano-banana-pro',
+  'nano banana pro': 'nano-banana-pro',
+  nanobananapro: 'nano-banana-pro',
+  'gemini-3-pro-image': 'nano-banana-pro',
 };
 
 const MODE_ALIASES: Record<string, PersonaGenerationMode> = {
@@ -172,10 +211,16 @@ export const getPersonaImageEngineOptions = (hasPersona: boolean) => {
   const personaEngines: PersonaImageEngineOption[] = [
     IMAGE_ENGINES['flux-dev-lora'],
     IMAGE_ENGINES['flux-kontext-lora'],
+    IMAGE_ENGINES['nano-banana-pro'],
+    IMAGE_ENGINES['nano-banana-2'],
+    IMAGE_ENGINES['nano-banana'],
   ];
   const genericEngines: PersonaImageEngineOption[] = [
     IMAGE_ENGINES['flux-2-max'],
     IMAGE_ENGINES['flux-kontext-pro'],
+    IMAGE_ENGINES['nano-banana-pro'],
+    IMAGE_ENGINES['nano-banana-2'],
+    IMAGE_ENGINES['nano-banana'],
   ];
   return hasPersona ? personaEngines : genericEngines;
 };
@@ -208,6 +253,20 @@ export const resolvePersonaImageEngine = ({
 }): Exclude<PersonaImageEngineId, 'auto'> => {
   const normalizedEngine = normalizePersonaImageEngine(requestedEngine);
   if (normalizedEngine && normalizedEngine !== 'auto') {
+    // Nano Banana handles both prompt-only and reference-driven generation, with or without a persona.
+    if (
+      normalizedEngine === 'nano-banana'
+      || normalizedEngine === 'nano-banana-2'
+      || normalizedEngine === 'nano-banana-pro'
+    ) {
+      return normalizedEngine;
+    }
+    if (
+      (normalizedEngine === 'flux-kontext-lora' || normalizedEngine === 'flux-kontext-pro')
+      && !hasReferenceImage
+    ) {
+      return hasPersona ? 'flux-dev-lora' : 'flux-2-max';
+    }
     if (normalizedEngine === 'flux-kontext-lora' && !hasPersona) {
       return hasReferenceImage ? 'flux-kontext-pro' : 'flux-2-max';
     }

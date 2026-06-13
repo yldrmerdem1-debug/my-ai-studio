@@ -50,8 +50,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Use fofr/luma-dream-machine or kling v2.5
-    const modelOptions = ['fofr/luma-dream-machine', 'kwaivgi/kling-v2.5-turbo-pro'];
+    // Prefer Seedance 2.0, then keep older video engines as fallbacks.
+    const modelOptions = [
+      process.env.REPLICATE_SEEDANCE_2_0_MODEL || 'bytedance/seedance-2.0',
+      'fofr/luma-dream-machine',
+      'kwaivgi/kling-v2.5-turbo-pro',
+    ];
     let prediction;
     let lastError;
 

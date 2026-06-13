@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react';
 import type { User } from '@/lib/subscription';
 import { canTrainVisualPersona, canTrainVoicePersona, isPremiumUser } from '@/lib/subscription';
+import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 
 export type PersonaStatus = 'none' | 'training' | 'ready';
 export type PersonaTrainingStatus = 'training' | 'completed' | 'failed' | 'canceled';
@@ -71,8 +72,38 @@ const resolveInitialUser = (): User | null => {
   }
   return {
     id,
+    fullName: 'Guest workspace',
     plan: 'free',
     isPremium: false,
+  };
+};
+
+const mapAuthUserToAppUser = (authUser: any): User => {
+  const plan = authUser?.user_metadata?.plan === 'premium' || authUser?.app_metadata?.plan === 'premium'
+    ? 'premium'
+    : 'free';
+  const metadata = authUser?.user_metadata || {};
+  const appMetadata = authUser?.app_metadata || {};
+  const firstName = String(metadata.first_name || metadata.firstName || '').trim();
+  const lastName = String(metadata.last_name || metadata.lastName || '').trim();
+  const fullName = String(
+    metadata.full_name
+    || metadata.name
+    || [firstName, lastName].filter(Boolean).join(' ')
+    || authUser.email?.split('@')?.[0]
+    || ''
+  ).trim();
+  return {
+    id: authUser.id,
+    email: authUser.email,
+    firstName: firstName || undefined,
+    lastName: lastName || undefined,
+    fullName: fullName || undefined,
+    username: String(metadata.username || metadata.user_name || '').trim() || undefined,
+    avatarUrl: String(metadata.avatar_url || metadata.picture || metadata.avatarUrl || '').trim() || undefined,
+    isAdmin: appMetadata.role === 'admin' || metadata.role === 'admin',
+    plan,
+    isPremium: plan === 'premium',
   };
 };
 
@@ -90,8 +121,71 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const supabase = getSupabaseBrowserClient();
+    let cancelled = false;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (cancelled) return;
+      const authUser = data.session?.user;
+      if (authUser?.id) {
+        localStorage.setItem('localUserId', authUser.id);
+        setUser(mapAuthUserToAppUser(authUser));
+        return;
+      }
+
+      const envUserId = process.env.NEXT_PUBLIC_PERSONA_USER_ID;
+      const storedId = localStorage.getItem('localUserId');
+      const id = envUserId || storedId || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `user_${Date.now()}`);
+      if (!storedId) {
+        localStorage.setItem('localUserId', id);
+      }
+      setUser(prev => ({
+        id,
+        fullName: prev?.fullName ?? 'Guest workspace',
+        plan: prev?.plan ?? 'free',
+        isPremium: prev?.isPremium,
+      }));
+    }).catch(() => {
+      const envUserId = process.env.NEXT_PUBLIC_PERSONA_USER_ID;
+      const storedId = localStorage.getItem('localUserId');
+      const id = envUserId || storedId || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `user_${Date.now()}`);
+      if (!storedId) {
+        localStorage.setItem('localUserId', id);
+      }
+      setUser(prev => ({
+        id,
+        fullName: prev?.fullName ?? 'Guest workspace',
+        plan: prev?.plan ?? 'free',
+        isPremium: prev?.isPremium,
+      }));
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const authUser = session?.user;
+      if (authUser?.id) {
+        localStorage.setItem('localUserId', authUser.id);
+        localStorage.setItem('assetCacheUserId', authUser.id);
+        setUser(mapAuthUserToAppUser(authUser));
+        return;
+      }
+      setUser(resolveInitialUser());
+    });
+
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
     const envUserId = process.env.NEXT_PUBLIC_PERSONA_USER_ID;
     const storedId = localStorage.getItem('localUserId');
+    if (storedId || envUserId) return;
     const id = envUserId || storedId || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `user_${Date.now()}`);
@@ -100,6 +194,7 @@ export function PersonaProvider({ children }: { children: ReactNode }) {
     }
     setUser(prev => ({
       id,
+      fullName: prev?.fullName ?? 'Guest workspace',
       plan: prev?.plan ?? 'free',
       isPremium: prev?.isPremium,
     }));

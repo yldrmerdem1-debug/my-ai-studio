@@ -1,70 +1,52 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
+import { rebuildStudioBackground } from '@/lib/background-rebuild';
+
+const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const normalizeImageContentType = (value: string | null | undefined) => {
+  const normalized = String(value || '').split(';')[0].trim().toLowerCase();
+  return normalized.startsWith('image/') ? normalized : 'image/jpeg';
+};
+
+const toDataUrl = (buffer: Buffer, contentType: string) =>
+  `data:${normalizeImageContentType(contentType)};base64,${buffer.toString('base64')}`;
 
 export async function POST(request: NextRequest) {
   try {
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-    
-    if (!apiToken || !apiToken.trim()) {
+    const apiToken = safeTrim(process.env.REPLICATE_API_TOKEN);
+
+    if (!apiToken) {
       return NextResponse.json(
         { error: 'API token not configured' },
         { status: 500 }
       );
     }
 
-    const replicate = new Replicate({ auth: apiToken.trim() });
     const formData = await request.formData();
-    
-    const imageFile = formData.get('image') as File;
-    const prompt = (formData.get('prompt') as string) || 'studio lighting, professional environment, commercial-quality image';
+    const imageEntry = formData.get('image');
+    const prompt = safeTrim(formData.get('prompt'));
 
-    if (!imageFile) {
+    if (!(imageEntry instanceof File)) {
       return NextResponse.json(
         { error: 'Image is required' },
         { status: 400 }
       );
     }
 
-    // Image Studio uses Replicate for image synthesis and AI Persona for identity consistency.
-    // This endpoint preserves the current pipeline while the studio synthesis layer is refined.
-    // First, extract the subject using lucataco/remove-bg
-    const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
-    const imageBase64 = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
-
-    // Extract subject
-    const removeBgPrediction = await replicate.predictions.create({
-      version: 'lucataco/remove-bg',
-      input: {
-        image: imageBase64,
-      },
-    });
-
-    // Poll for subject extraction completion
-    let removeBgResult = removeBgPrediction;
-    let attempts = 0;
-    while (attempts < 30 && removeBgResult.status !== 'succeeded' && removeBgResult.status !== 'failed') {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      removeBgResult = await replicate.predictions.get(removeBgPrediction.id);
-      attempts++;
-    }
-
-    if (removeBgResult.status !== 'succeeded' || !removeBgResult.output) {
-      return NextResponse.json(
-        { error: 'Failed to prepare image for studio rendering' },
-        { status: 500 }
-      );
-    }
-
-    const transparentImageUrl = Array.isArray(removeBgResult.output) ? removeBgResult.output[0] : removeBgResult.output;
-
-    // In future: use image-to-image diffusion for studio synthesis and compositing.
-    // For now, return the extracted subject to keep the pipeline stable.
-    
-    return NextResponse.json({ imageUrl: transparentImageUrl });
-  } catch (error: any) {
+    const imageBuffer = Buffer.from(await imageEntry.arrayBuffer());
+    const sourceContentType = normalizeImageContentType(imageEntry.type);
+    const sourceImageDataUrl = toDataUrl(imageBuffer, sourceContentType);
+    return NextResponse.json(
+      await rebuildStudioBackground({
+        apiToken,
+        image: sourceImageDataUrl,
+        prompt,
+      })
+    );
+  } catch (error: unknown) {
     console.error('Image Studio error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to generate studio image' },
+      { error: error instanceof Error ? error.message : 'Failed to generate studio image' },
       { status: 500 }
     );
   }

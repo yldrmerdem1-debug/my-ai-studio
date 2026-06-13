@@ -1,6 +1,29 @@
+import { getSupabaseBrowserClient } from '@/lib/supabase/client';
+
 type PersonaApiResult<T = any> = {
   ok: boolean;
   personas: T[];
+};
+
+// Attach identity so the server can scope personas to the current account.
+// Prefer a verified Supabase session token; fall back to the local-dev user id.
+const buildPersonaRequestInit = async (userId?: string | null): Promise<RequestInit> => {
+  const headers: Record<string, string> = { Pragma: 'no-cache' };
+  try {
+    if (typeof window !== 'undefined') {
+      const supabase = getSupabaseBrowserClient();
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+        return { cache: 'no-store', headers };
+      }
+    }
+  } catch {
+    // ignore and fall through to local id
+  }
+  if (userId) headers['X-Local-User-Id'] = userId;
+  return { cache: 'no-store', headers };
 };
 
 const parsePersonaPayload = <T>(payload: any): T[] =>
@@ -29,10 +52,7 @@ const buildPersonaQuery = (userId?: string | null) => {
 
 export const fetchPersonasFromApi = async <T = any>(userId?: string | null): Promise<PersonaApiResult<T>> => {
   const query = buildPersonaQuery(userId);
-  const requestInit: RequestInit = {
-    cache: 'no-store',
-    headers: { Pragma: 'no-cache' },
-  };
+  const requestInit = await buildPersonaRequestInit(userId);
 
   const primaryResponse = await fetch(`/api/save-persona${query}`, requestInit);
   const primaryPayload = await parseJsonSafe(primaryResponse);

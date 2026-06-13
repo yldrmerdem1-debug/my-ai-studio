@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuroraBackground from '@/components/AuroraBackground';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Folder, Image as ImageIcon, Video, FileText, Download, Trash2, Volume2 } from 'lucide-react';
@@ -25,47 +26,38 @@ export default function MyAssetsPage() {
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
 
   useEffect(() => {
-    // Load assets from localStorage using the storage utility
-    if (typeof window !== 'undefined') {
-      import('@/lib/assets-storage').then(({ getAssets }) => {
-        setAssets(getAssets());
-      });
-    }
+    let mounted = true;
     
-    // Listen for storage updates from other tabs
-    const handleStorageChange = () => {
-      if (typeof window !== 'undefined') {
-        import('@/lib/assets-storage').then(({ getAssets }) => {
-          setAssets(getAssets());
-        });
-      }
+    const loadAssets = async () => {
+      if (typeof window === 'undefined') return;
+      const { fetchAssets, getAssets } = await import('@/lib/assets-storage');
+      const localAssets = getAssets();
+      if (mounted && localAssets.length > 0) setAssets(localAssets);
+      const syncedAssets = await fetchAssets();
+      if (mounted) setAssets(syncedAssets);
     };
     
+    void loadAssets();
+
+    const handleStorageChange = () => void loadAssets();
+    const handleAssetUpdate = () => void loadAssets();
+
     window.addEventListener('storage', handleStorageChange);
-    
-    // Also check for local updates (same tab)
-    const interval = setInterval(() => {
-      if (typeof window !== 'undefined') {
-        import('@/lib/assets-storage').then(({ getAssets }) => {
-          const currentAssets = getAssets();
-          if (currentAssets.length !== assets.length) {
-            setAssets(currentAssets);
-          }
-        });
-      }
-    }, 1000);
+    window.addEventListener('assets:updated', handleAssetUpdate);
     
     return () => {
+      mounted = false;
       window.removeEventListener('storage', handleStorageChange);
-      clearInterval(interval);
+      window.removeEventListener('assets:updated', handleAssetUpdate);
     };
-  }, [assets.length]);
+  }, []);
 
   const handleDelete = async (id: string) => {
     if (typeof window !== 'undefined') {
-      const { deleteAsset, getAssets } = await import('@/lib/assets-storage');
+      const { deleteAsset, fetchAssets, getAssets } = await import('@/lib/assets-storage');
       deleteAsset(id);
       setAssets(getAssets());
+      setAssets(await fetchAssets());
     }
   };
 
@@ -89,6 +81,7 @@ export default function MyAssetsPage() {
 
   return (
     <div className="relative min-h-screen bg-black">
+      <AuroraBackground />
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
       <PricingModal isOpen={isPricingModalOpen} onClose={() => setIsPricingModalOpen(false)} />
 

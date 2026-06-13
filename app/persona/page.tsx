@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuroraBackground from '@/components/AuroraBackground';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Sparkles, Camera, Target, Lock, Pencil, Trash2 } from 'lucide-react';
@@ -25,6 +26,25 @@ import {
   persistPersonaNames,
 } from '@/app/persona/_lib/persona-page-helpers';
 import { usePersistedSelectedTrainingId } from '@/app/persona/_hooks/usePersistedSelectedTrainingId';
+
+const TRAINING_ESTIMATES: Record<PersonaSubjectType, { range: string; note: string }> = {
+  human: {
+    range: '15-30 minutes',
+    note: 'Human identity needs a bit more learning time for face consistency.',
+  },
+  animal: {
+    range: '12-25 minutes',
+    note: 'Animal training is tuned for recognizable markings and body shape.',
+  },
+  product: {
+    range: '12-25 minutes',
+    note: 'Product training focuses on packaging, shape, and repeatable ad visuals.',
+  },
+  other: {
+    range: '12-25 minutes',
+    note: 'Custom subjects use a balanced training preset for faster turnaround.',
+  },
+};
 
 export default function PersonaPage() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
@@ -67,6 +87,7 @@ export default function PersonaPage() {
   const [renameValue, setRenameValue] = useState('');
   const [renameTargetId, setRenameTargetId] = useState<string | null>(null);
   const [cancelingPersonaId, setCancelingPersonaId] = useState<string | null>(null);
+  const [deletingPersonaId, setDeletingPersonaId] = useState<string | null>(null);
   const [isRefreshingTrainingStatus, setIsRefreshingTrainingStatus] = useState(false);
   const { user, persona, requestVisualPersona, setVisualStatus, setPersonaStatus, setIsPremiumUser } = usePersona();
   const {
@@ -87,9 +108,10 @@ export default function PersonaPage() {
   const subjectSummary = subjectType
     ? PERSONA_SUBJECT_TYPE_LABELS[subjectType]
     : 'Subject';
-  const providerStackDescription = trainingProfile.provider === 'replicate'
-    ? 'Provider stack: Replicate FLUX Dev LoRA trainer only for maximum fidelity. No lower-quality fallback is used.'
-    : 'Provider stack: fal.ai portrait trainer first for maximum human identity fidelity, Replicate FLUX Dev LoRA fallback if fal.ai is unavailable.';
+  const trainingEstimate = TRAINING_ESTIMATES[subjectType || 'human'];
+  const providerStackDescription = subjectType === 'human' || !subjectType
+    ? 'Provider stack: fal.ai portrait trainer first for human identity, Replicate FLUX Dev LoRA fallback if fal.ai is unavailable.'
+    : 'Provider stack: fal.ai fast LoRA trainer first for faster turnaround, Replicate FLUX Dev LoRA fallback if fal.ai is unavailable.';
 
   const clearSelectedTrainingId = useCallback(() => {
     setSelectedPersonaId(null);
@@ -226,13 +248,30 @@ export default function PersonaPage() {
     [trainedPersonas]
   );
   const showTrainingBanner = Boolean(activeTraining || isUploadingImages || isTraining);
+  const activeTrainingName = activeTraining?.name?.trim()
+    || (isTraining && personaName.trim() ? personaName.trim() : 'Untitled Persona');
+  const activeTrainingSubject = activeTraining?.subjectType
+    ? PERSONA_SUBJECT_TYPE_LABELS[activeTraining.subjectType]
+    : subjectType
+      ? PERSONA_SUBJECT_TYPE_LABELS[subjectType]
+      : null;
+  const visibleTrainingProgress = typeof activeTraining?.progress === 'number'
+    ? Math.min(100, Math.max(0, activeTraining.progress))
+    : isTrainingIndeterminate
+      ? null
+      : Math.min(100, Math.max(0, trainingProgress));
+  const visibleTrainingStatus = trainingStatus
+    || (activeTraining ? `Training ${activeTrainingName}` : 'AI model training in progress');
+  const visibleProgressLabel = visibleTrainingProgress === null
+    ? 'Waiting for provider updates'
+    : `${Math.round(visibleTrainingProgress)}% complete`;
 
   useEffect(() => {
     if (!activeTraining) return;
     setIsTraining(true);
     setIsTrainingComplete(false);
     setTrainingError(null);
-    setTrainingStatus('Persona training in progress');
+    setTrainingStatus('AI model training in progress');
     setTrainingId(activeTraining.personaKey);
     if (typeof activeTraining.progress === 'number') {
       setIsTrainingIndeterminate(false);
@@ -291,6 +330,62 @@ export default function PersonaPage() {
   };
 
   const personaList = trainedPersonas;
+
+  const handleDeletePersona = async (personaItem: (typeof trainedPersonas)[number]) => {
+    const confirmed = window.confirm(
+      `Permanently delete "${personaItem.name?.trim() || 'Untitled Persona'}"? This removes it from the saved persona registry.`
+    );
+    if (!confirmed) return;
+    if (deletingPersonaId === personaItem.personaKey) return;
+
+    setDeletingPersonaId(personaItem.personaKey);
+    try {
+      const response = await fetch('/api/save-persona', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          personaId: personaItem.dbId ?? personaItem.personaKey,
+          user,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      const confirmedDeleted = data?.deleted === true || data?.localDeleted === true || data?.remoteDeleted === true;
+      if (!response.ok || data?.success !== true || !confirmedDeleted) {
+        throw new Error(data?.error || data?.details || 'Failed to delete persona');
+      }
+
+      const deleted = getDeletedPersonaIds();
+      deleted.add(personaItem.personaKey);
+      persistDeletedPersonaIds(deleted);
+
+      const nameMap = getPersonaNames();
+      delete nameMap[personaItem.personaKey];
+      persistPersonaNames(nameMap);
+
+      if (typeof window !== 'undefined') {
+        const triggerMap = JSON.parse(localStorage.getItem('personaTriggerWords') || '{}');
+        delete triggerMap[personaItem.personaKey];
+        localStorage.setItem('personaTriggerWords', JSON.stringify(triggerMap));
+        if (localStorage.getItem('selectedPersonaTrainingId') === personaItem.personaKey) {
+          localStorage.removeItem('selectedPersonaTrainingId');
+        }
+      }
+
+      if (selectedPersonaId === personaItem.personaKey || trainingId === personaItem.personaKey) {
+        stopPolling();
+        clearSelectedTrainingId();
+        clearTrainingUi('');
+      }
+
+      setTrainedPersonas(prev => prev.filter(item => item.id !== personaItem.id));
+      await refreshPersonas({ silent: true }).catch(() => undefined);
+    } catch (error) {
+      console.error('Failed to delete persona:', error);
+      alert(error instanceof Error ? error.message : 'Failed to delete persona');
+    } finally {
+      setDeletingPersonaId(null);
+    }
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!canTrainVisual) {
@@ -410,7 +505,7 @@ export default function PersonaPage() {
     } else {
       setIsTrainingIndeterminate(true);
     }
-    setTrainingStatus('Persona training in progress');
+    setTrainingStatus('AI model training in progress');
     setTrainingError(null);
     if (personaId) {
       setTrainedPersonas(prev => prev.map(item => (
@@ -538,14 +633,14 @@ export default function PersonaPage() {
 
     setIsTraining(true);
     setTrainingProgress(0);
-    setTrainingStatus('Preparing training data...');
+    setTrainingStatus('Preparing your training images...');
     setTrainingError(null);
     const newTriggerWord = generateTriggerWord();
     setTriggerWord(newTriggerWord);
     const personaId = personaRequest.personaId ?? persona?.id;
 
     try {
-      setTrainingStatus('Uploading images to training service...');
+      setTrainingStatus('Uploading images to the training service...');
       setTrainingProgress(10);
 
       const formData = new FormData();
@@ -640,7 +735,7 @@ export default function PersonaPage() {
         console.warn('Preview image upload failed (continuing):', e);
       }
       setTrainingId(data.trainingId ?? '');
-      setTrainingStatus('Persona training in progress');
+      setTrainingStatus('AI model training is running in the background');
       setIsTrainingIndeterminate(true);
       setTrainingProgress(40);
       if (data.trainingId && typeof window !== 'undefined') {
@@ -730,10 +825,11 @@ export default function PersonaPage() {
 
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0a0a0a]">
+    <div className="relative min-h-screen bg-black">
+      <AuroraBackground />
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
-      
-      <main className="ml-64 p-8">
+
+      <main className="relative z-10 ml-64 p-8">
         <div className="mx-auto max-w-6xl">
           {/* Header */}
           <div className="mb-8">
@@ -903,19 +999,25 @@ export default function PersonaPage() {
                 Recommended range: {trainingProfile.recommendedMinImages}-{trainingProfile.recommendedMaxImages}.
               </p>
               <p className="mt-2 text-xs text-cyan-50/70">
+                Recommended preset: {trainingProfile.defaultSteps} training steps. Estimated wait: {trainingEstimate.range}.
+              </p>
+              <p className="mt-2 text-xs text-cyan-50/70">
                 {providerStackDescription}
               </p>
             </div>
 
             <div className="mb-6 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-gray-300">
               <p className="font-medium text-white">
-                Training Mode: {subjectSummary}
+                Recommended Training Mode: {subjectSummary}
               </p>
               <p className="mt-1 text-gray-400">
                 {subjectGuidance}
               </p>
               <p className="mt-2 text-xs text-gray-500">
                 Optional reference images: up to {trainingProfile.referenceImagesMax}. Recommended for tighter exact-mode outputs later, but not required.
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                {trainingEstimate.note} Training keeps running if you leave this page.
               </p>
             </div>
 
@@ -1005,11 +1107,10 @@ export default function PersonaPage() {
             )}
 
             <p className="text-sm text-gray-500 mb-4">
-              When training starts, you’ll see progress and your trigger word here.
-              Use that trigger word in any tool to get consistent results.
+              Training starts in Recommended mode. You will see progress here, and you can keep working on scripts or ad concepts while the model learns.
             </p>
             <p className="text-sm text-gray-500 mb-4">
-              If you leave this page, training continues in the background.
+              Estimated wait: {trainingEstimate.range}. Training continues in the background if you leave this page.
             </p>
             {trainingError && (
               <p className="text-sm text-red-400 mb-4">
@@ -1022,7 +1123,7 @@ export default function PersonaPage() {
               disabled={isTraining || isUploadingImages || uploadedFiles.length < trainingProfile.minImages || !canTrainVisual}
               className="w-full glass rounded-lg px-6 py-4 text-white font-semibold bg-gradient-to-r from-[#00d9ff] to-[#0099cc] hover:from-[#00d9ff]/90 hover:to-[#0099cc]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isTraining ? 'Training in Progress...' : 'Train My AI Persona'}
+              {isTraining ? 'Training in Progress...' : 'Start Recommended Training'}
             </button>
 
             {uploadedFiles.length < trainingProfile.minImages && uploadedFiles.length > 0 && (
@@ -1127,30 +1228,12 @@ export default function PersonaPage() {
                             </button>
                           )}
                           <button
-                            onClick={async () => {
-                              const confirmed = window.confirm('Remove this persona from your list?');
-                              if (!confirmed) return;
-                              try {
-                                await fetch('/api/save-persona', {
-                                  method: 'DELETE',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({
-                                    personaId: personaItem.dbId ?? personaItem.personaKey,
-                                    user,
-                                  }),
-                                });
-                              } catch (error) {
-                                console.error('Failed to delete persona:', error);
-                              }
-                              const deleted = getDeletedPersonaIds();
-                              deleted.add(personaItem.personaKey);
-                              persistDeletedPersonaIds(deleted);
-                              setTrainedPersonas(prev => prev.filter(item => item.id !== personaItem.id));
-                            }}
-                            className="px-3 py-2 rounded-lg text-xs font-semibold bg-red-500/20 text-red-300 hover:bg-red-500/30 inline-flex items-center gap-2"
+                            onClick={() => handleDeletePersona(personaItem)}
+                            disabled={deletingPersonaId === personaItem.personaKey}
+                            className="px-3 py-2 rounded-lg text-xs font-semibold bg-red-500/20 text-red-300 hover:bg-red-500/30 inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            Delete
+                            {deletingPersonaId === personaItem.personaKey ? 'Deleting...' : 'Delete'}
                           </button>
                         </div>
                       </div>
@@ -1170,8 +1253,12 @@ export default function PersonaPage() {
                       {personaItem.status === 'training' && (
                         <div className="mt-4 rounded-xl border border-cyan-500/10 bg-cyan-500/[0.04] p-3">
                           <div className="flex items-center justify-between text-[11px] text-gray-400 mb-2">
-                            <span>Training progress</span>
-                            <span>{typeof personaItem.progress === 'number' ? `${personaItem.progress}%` : 'calculating...'}</span>
+                            <span>Training progress for {personaItem.name?.trim() || 'Untitled Persona'}</span>
+                            <span>
+                              {typeof personaItem.progress === 'number'
+                                ? `${Math.round(personaItem.progress)}% complete`
+                                : 'Waiting for provider updates'}
+                            </span>
                           </div>
                           <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
                             <div
@@ -1207,8 +1294,54 @@ export default function PersonaPage() {
                     </div>
                   </div>
                   <div>
-                    <h2 className="text-2xl font-bold text-white">Training Your AI Persona</h2>
-                    <p className="text-sm text-gray-400">Creating your unique digital twin...</p>
+                    <h2 className="text-2xl font-bold text-white">
+                      Training: {activeTrainingName}
+                    </h2>
+                    <p className="text-sm text-gray-400">
+                      {visibleProgressLabel}. You can leave this page; training continues in the background.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mb-6 grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Persona</p>
+                    <p className="mt-1 text-sm font-semibold text-white">{activeTrainingName}</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Subject</p>
+                    <p className="mt-1 text-sm font-semibold text-white">{activeTrainingSubject || 'Not specified'}</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Progress</p>
+                    <p className="mt-1 text-sm font-semibold text-[#00d9ff]">{visibleProgressLabel}</p>
+                  </div>
+                </div>
+
+                <div className="mb-6 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] p-4">
+                  <p className="text-sm font-semibold text-emerald-100">Keep creating while training runs</p>
+                  <p className="mt-1 text-sm text-emerald-100/75">
+                    Your trained model unlocks the most consistent visuals when it is ready. In the meantime, prepare ad scripts, prompts, and quick creative directions.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link
+                      href="/ad-script"
+                      className="rounded-lg border border-emerald-400/30 px-3 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/10"
+                    >
+                      Write Ad Scripts
+                    </Link>
+                    <Link
+                      href="/background-change"
+                      className="rounded-lg border border-emerald-400/30 px-3 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/10"
+                    >
+                      Plan Product Scenes
+                    </Link>
+                    <Link
+                      href="/studio"
+                      className="rounded-lg border border-emerald-400/30 px-3 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/10"
+                    >
+                      Open Ad Studio
+                    </Link>
                   </div>
                 </div>
 
@@ -1233,12 +1366,10 @@ export default function PersonaPage() {
                 <div className="mb-6">
                   <div className="flex justify-between items-center text-sm mb-3">
                     <span className="text-gray-300 font-medium">
-                      {trainingStatus || 'Persona training in progress'}
+                      {visibleTrainingStatus}
                     </span>
                     <span className="text-[#00d9ff] font-bold text-lg">
-                      {typeof activeTraining?.progress === 'number'
-                        ? `${Math.round(activeTraining.progress)}%`
-                        : isTrainingIndeterminate ? '—' : `${Math.round(trainingProgress)}%`}
+                      {visibleTrainingProgress === null ? 'Waiting for updates' : `${Math.round(visibleTrainingProgress)}%`}
                     </span>
                   </div>
                   <div className="relative w-full bg-gray-800/50 rounded-full h-6 overflow-hidden border border-gray-700">
@@ -1246,9 +1377,9 @@ export default function PersonaPage() {
                     <div
                       className={`relative h-full bg-gradient-to-r from-[#00d9ff] via-[#0099cc] to-[#00d9ff] transition-all duration-700 ease-out shadow-lg ${isTrainingIndeterminate ? 'animate-pulse' : ''}`}
                       style={{
-                        width: isTrainingIndeterminate
+                        width: visibleTrainingProgress === null
                           ? '100%'
-                          : `${typeof activeTraining?.progress === 'number' ? activeTraining.progress : trainingProgress}%`,
+                          : `${visibleTrainingProgress}%`,
                       }}
                     >
                       {/* Shimmer effect */}
@@ -1258,20 +1389,20 @@ export default function PersonaPage() {
                     <div
                       className="absolute top-0 h-full bg-[#00d9ff]/50 blur-md transition-all duration-700"
                       style={{
-                        width: isTrainingIndeterminate
+                        width: visibleTrainingProgress === null
                           ? '100%'
-                          : `${typeof activeTraining?.progress === 'number' ? activeTraining.progress : trainingProgress}%`,
+                          : `${visibleTrainingProgress}%`,
                       }}
                     />
                   </div>
                   
                   {/* Step indicators */}
-                  {!isTrainingIndeterminate && (
+                  {visibleTrainingProgress !== null && (
                     <div className="flex justify-between mt-4 text-xs text-gray-500">
-                      <span className={trainingProgress > 10 ? 'text-[#00d9ff]' : ''}>✓ Preparing</span>
-                      <span className={trainingProgress > 30 ? 'text-[#00d9ff]' : ''}>✓ Uploading</span>
-                      <span className={trainingProgress > 50 ? 'text-[#00d9ff]' : ''}>✓ Training</span>
-                      <span className={trainingProgress > 90 ? 'text-[#00d9ff]' : ''}>✓ Finalizing</span>
+                      <span className={visibleTrainingProgress > 10 ? 'text-[#00d9ff]' : ''}>✓ Preparing</span>
+                      <span className={visibleTrainingProgress > 30 ? 'text-[#00d9ff]' : ''}>✓ Uploading</span>
+                      <span className={visibleTrainingProgress > 50 ? 'text-[#00d9ff]' : ''}>✓ Training</span>
+                      <span className={visibleTrainingProgress > 90 ? 'text-[#00d9ff]' : ''}>✓ Finalizing</span>
                     </div>
                   )}
                 </div>
@@ -1299,15 +1430,15 @@ export default function PersonaPage() {
                   )}
                 </div>
 
-                {/* Estimated time */}
+                {/* Estimated wait */}
                 <div className="flex items-center justify-center gap-2 text-sm text-gray-400 mb-4">
                   <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <span>
-                    {isTrainingIndeterminate
-                      ? 'Estimated time: calculating...'
-                      : `Estimated time: ${Math.max(1, Math.ceil((100 - trainingProgress) / 10))} minutes remaining`}
+                    {visibleTrainingProgress === null
+                      ? `Estimated wait: ${trainingEstimate.range}`
+                      : `Typical total wait: ${trainingEstimate.range}. Provider queues can vary.`}
                   </span>
                 </div>
 
@@ -1426,7 +1557,7 @@ export default function PersonaPage() {
                   <span className="text-2xl">2️⃣</span>
                   <div>
                     <h3 className="text-white font-medium mb-1">Training</h3>
-                    <p>Our AI trains a custom model based on your images. This takes 5-10 minutes.</p>
+                    <p>Our AI trains a custom model based on your images. Recommended training usually takes {trainingEstimate.range}, and it keeps running in the background.</p>
                   </div>
                 </div>
                 <div className="flex gap-4">

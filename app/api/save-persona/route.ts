@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireUserId, requireVisualTrainingAccess, requirePersonaAccess } from '@/lib/persona-guards';
-import { readPersonas, upsertPersona, type PersonaRecord } from '@/lib/persona-registry';
+import { requireAuthenticatedUser } from '@/lib/auth-user';
+import { deletePersona, readPersonas, upsertPersona, type PersonaRecord } from '@/lib/persona-registry';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 import { downloadMediaWithValidation } from '@/lib/replicate-media';
 import { resolveReplicateDownloadUrl } from '@/lib/replicate-media';
@@ -37,6 +38,26 @@ const isProbablySafetensorsPath = (value: string) =>
   typeof value === 'string' && value.trim().toLowerCase().endsWith('.safetensors');
 
 const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+const toFetchablePersonaImageUrl = (value: unknown, origin: string) => {
+  const trimmed = safeTrim(value);
+  if (!trimmed) return '';
+  if (trimmed.startsWith('/')) {
+    try {
+      return new URL(trimmed, origin).toString();
+    } catch {
+      return trimmed;
+    }
+  }
+  const replicateFileMatch = trimmed.match(/^https?:\/\/api\.replicate\.com\/v1\/files\/([^/?#]+)/i);
+  if (replicateFileMatch) {
+    try {
+      return new URL(`/api/replicate-file?id=${encodeURIComponent(replicateFileMatch[1])}`, origin).toString();
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+};
 const isGender = (value: unknown): value is 'male' | 'female' => value === 'male' || value === 'female';
 const isModelFamily = (value: unknown): value is 'flux-lora' =>
   value === 'flux-lora';
@@ -47,10 +68,8 @@ const isFluxModelRef = (value: unknown) => {
 const isUnsupportedLegacyPersona = (value: any) => {
   const modelFamily = safeTrim(value?.modelFamily ?? value?.model_family).toLowerCase();
   const trainingBaseModel = safeTrim(value?.trainingBaseModel ?? value?.training_base_model).toLowerCase();
-  const destinationModel = safeTrim(value?.destinationModel ?? value?.destination_model).toLowerCase();
   return (modelFamily && modelFamily !== 'flux-lora')
-    || !isFluxModelRef(trainingBaseModel)
-    || !isFluxModelRef(destinationModel);
+    || !isFluxModelRef(trainingBaseModel);
 };
 
 const normalizeReferenceImages = (
@@ -595,7 +614,14 @@ export async function GET(request: NextRequest) {
   try {
     const { client: supabase, error: supabaseError } = getSupabaseAdminClient();
 
-    const userId = request.nextUrl.searchParams.get('userId');
+    // Account isolation: never list personas without a verified identity, and
+    // always scope to the caller's own id. Only admins may inspect another user.
+    const auth = await requireAuthenticatedUser(request);
+    if (!auth.ok) {
+      return NextResponse.json({ personas: [] });
+    }
+    const requestedUserId = request.nextUrl.searchParams.get('userId');
+    const userId = auth.isAdmin && requestedUserId ? requestedUserId : auth.userId;
     const personaId = request.nextUrl.searchParams.get('personaId')
       || request.nextUrl.searchParams.get('id');
 
@@ -640,7 +666,7 @@ export async function GET(request: NextRequest) {
     const rawImageUrl = (p: any) => p.imageUrl ?? p.image_url;
 
     const normalizedSupabase = await Promise.all((data ?? []).filter((persona: any) => !isUnsupportedLegacyPersona(persona)).map(async (persona: any) => {
-      let imageUrl = rawImageUrl(persona);
+      let imageUrl = toFetchablePersonaImageUrl(rawImageUrl(persona), request.nextUrl.origin);
       const path = storagePath(persona);
       if (path && typeof path === 'string') {
         try {
@@ -695,8 +721,8 @@ export async function GET(request: NextRequest) {
       name: p.name ?? null,
       trigger_word: p.triggerWord ?? null,
       triggerWord: p.triggerWord ?? null,
-      image_url: p.imageUrl ?? null,
-      imageUrl: p.imageUrl ?? null,
+      image_url: toFetchablePersonaImageUrl(p.imageUrl, request.nextUrl.origin) || null,
+      imageUrl: toFetchablePersonaImageUrl(p.imageUrl, request.nextUrl.origin) || null,
       storage_path: p.storagePath ?? null,
       storagePath: p.storagePath ?? null,
       destination_model: p.destinationModel ?? null,
@@ -826,35 +852,80 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
+    const localDeleted = await deletePersona(String(personaId));
     const { client: supabase, error: supabaseError } = getSupabaseAdminClient();
     if (!supabase || supabaseError) {
-      return NextResponse.json(
-        { error: supabaseError || 'Supabase not configured', code: 'SUPABASE_MISSING' },
-        { status: 500 }
-      );
+      if (!localDeleted) {
+        return NextResponse.json(
+          {
+            error: 'Persona was not found in the local registry and Supabase is unavailable.',
+            code: 'PERSONA_DELETE_NOT_CONFIRMED',
+          },
+          { status: 502 }
+        );
+      }
+      return NextResponse.json({
+        success: true,
+        deleted: true,
+        localDeleted: true,
+        remoteDeleted: false,
+        warning: supabaseError || 'Supabase not configured; deleted from local registry only.',
+      });
     }
 
-    let deleteResult = await supabase
-      .from('personas')
-      .delete()
-      .or(`id.eq.${personaId},training_id.eq.${personaId},model_id.eq.${personaId}`);
-
-    if (deleteResult.error && isMissingColumn(deleteResult.error, 'training_id')) {
-      deleteResult = await supabase
+    try {
+      let deleteResult = await supabase
         .from('personas')
         .delete()
-        .or(`id.eq.${personaId},model_id.eq.${personaId}`);
-    }
-    const deleteError = deleteResult.error;
+        .or(`id.eq.${personaId},training_id.eq.${personaId},model_id.eq.${personaId}`);
 
-    if (deleteError) {
+      if (deleteResult.error && isMissingColumn(deleteResult.error, 'training_id')) {
+        deleteResult = await supabase
+          .from('personas')
+          .delete()
+          .or(`id.eq.${personaId},model_id.eq.${personaId}`);
+      }
+      const deleteError = deleteResult.error;
+
+      if (deleteError) {
+        if (localDeleted) {
+          console.warn('[save-persona] Supabase delete failed after local delete:', deleteError);
+          return NextResponse.json({
+            success: true,
+            deleted: true,
+            localDeleted: true,
+            remoteDeleted: false,
+            warning: 'Deleted from local registry, but Supabase delete failed.',
+          });
+        }
+        return NextResponse.json(
+          { error: 'Failed to delete persona', code: 'PERSONA_DELETE_FAILED' },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        deleted: true,
+        localDeleted,
+        remoteDeleted: true,
+      });
+    } catch (deleteError: any) {
+      if (localDeleted) {
+        console.warn('[save-persona] Supabase delete threw after local delete:', deleteError);
+        return NextResponse.json({
+          success: true,
+          deleted: true,
+          localDeleted: true,
+          remoteDeleted: false,
+          warning: 'Deleted from local registry, but Supabase was unreachable.',
+        });
+      }
       return NextResponse.json(
-        { error: 'Failed to delete persona', code: 'PERSONA_DELETE_FAILED' },
-        { status: 500 }
+        { error: deleteError?.message || 'Failed to delete persona', code: 'PERSONA_DELETE_FAILED' },
+        { status: 502 }
       );
     }
-
-    return NextResponse.json({ success: true });
   } catch (error: any) {
     console.error('Delete persona error:', error);
     return NextResponse.json(

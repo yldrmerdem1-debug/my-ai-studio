@@ -336,7 +336,7 @@ export async function deletePersona(personaId: string): Promise<boolean> {
   const id = String(personaId || '').trim();
   if (!id) return false;
   const personas = await readPersonas();
-  const next = personas.filter((persona) => persona.personaId !== id);
+  const next = personas.filter((persona) => !matchesPersonaIdentifier(persona, id));
   if (next.length === personas.length) return false;
   await writePersonas(next);
   return true;

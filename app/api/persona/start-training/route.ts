@@ -25,7 +25,6 @@ export async function POST(request: NextRequest) {
     const personaId = requestBody?.personaId as string | undefined;
 
     const apiToken = process.env.REPLICATE_API_TOKEN;
-    console.log('REPLICATE TOKEN PREFIX:', apiToken?.slice(0, 6));
     if (!apiToken || apiToken.trim() === '') {
       return Response.json(
         { error: 'REPLICATE_API_TOKEN not configured' },
@@ -56,7 +55,17 @@ export async function POST(request: NextRequest) {
 
     const trainingEndpoint =
       'https://api.replicate.com/v1/models/replicate/fast-flux-trainer/versions/8b10794665aed907bb98a1a5324cd1d3a8bea0e9b31e65210967fb9c9e2e08ed/trainings';
-    const destination = 'yldrmerdem1-debug/persona-model';
+    const destination = String(
+      process.env.REPLICATE_FLUX_TRAINING_DESTINATION_MODEL
+      || process.env.REPLICATE_FLUX_TRAINING_DESTINATION
+      || ''
+    ).trim();
+    if (!destination) {
+      return Response.json(
+        { error: 'Replicate training destination is not configured' },
+        { status: 500 }
+      );
+    }
     const input_images = await resolveTrainingZipInputUrl(persona);
     if (!input_images) {
       return Response.json(

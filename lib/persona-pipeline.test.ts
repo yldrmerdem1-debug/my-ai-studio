@@ -21,8 +21,8 @@ test('human training profile uses portrait trainer and wider identity guidance',
 
 test('product training profile supports more training and reference images', () => {
   const profile = getPersonaTrainingProfile('product');
-  assert.equal(profile.engineId, 'flux-dev-lora-trainer');
-  assert.equal(profile.provider, 'replicate');
+  assert.equal(profile.engineId, 'flux-lora-fast-training');
+  assert.equal(profile.provider, 'fal');
   assert.equal(profile.minImages, 12);
   assert.equal(profile.maxImages, 40);
   assert.equal(profile.referenceImagesMax, 6);
@@ -42,6 +42,27 @@ test('auto engine prefers kontext when exact mode has reference', () => {
     generationMode: 'exact',
   });
   assert.equal(resolved, 'flux-kontext-lora');
+});
+
+test('requested reference engines fall back when no reference image exists', () => {
+  assert.equal(
+    resolvePersonaImageEngine({
+      requestedEngine: 'flux-kontext-lora',
+      hasPersona: true,
+      hasReferenceImage: false,
+      generationMode: 'exact',
+    }),
+    'flux-dev-lora'
+  );
+  assert.equal(
+    resolvePersonaImageEngine({
+      requestedEngine: 'flux-kontext-pro',
+      hasPersona: false,
+      hasReferenceImage: false,
+      generationMode: 'exact',
+    }),
+    'flux-2-max'
+  );
 });
 
 test('non-persona auto engine falls back to prompt-only flux when no reference exists', () => {
@@ -69,5 +90,9 @@ test('training engine label recognizes replicate flux trainer', () => {
   assert.equal(
     getTrainingEngineLabel('ostris/flux-dev-lora-trainer'),
     'Replicate FLUX Dev LoRA Trainer'
+  );
+  assert.equal(
+    getTrainingEngineLabel('fal-ai/flux-lora-fast-training'),
+    'FLUX LoRA Fast Training'
   );
 });

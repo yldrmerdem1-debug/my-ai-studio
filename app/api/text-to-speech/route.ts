@@ -132,8 +132,6 @@ export async function POST(request: NextRequest) {
     const resolvedVoiceId = voiceId || '21m00Tcm4TlvDq8ikWAM';
     const acceptHeader = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
 
-    console.log('API Key Check:', process.env.ELEVENLABS_API_KEY?.slice(0, 5) + '...');
-    console.log('API Key Suffix Check:', process.env.ELEVENLABS_API_KEY?.slice(-4));
     // Call ElevenLabs API
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${resolvedVoiceId}`, {
       method: 'POST',

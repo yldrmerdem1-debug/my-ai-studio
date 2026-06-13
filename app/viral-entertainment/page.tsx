@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuroraBackground from '@/components/AuroraBackground';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
 import { Zap, Video, Loader2 } from 'lucide-react';
@@ -88,6 +89,7 @@ export default function ViralEntertainmentPage() {
 
   return (
     <div className="relative min-h-screen bg-black">
+      <AuroraBackground />
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
       <PricingModal isOpen={isPricingModalOpen} onClose={() => setIsPricingModalOpen(false)} />
 

@@ -72,6 +72,28 @@ const parseJsonSafe = async (res: Response) => {
   }
 };
 
+const RUNWAY_PROMPT_TEXT_MAX_CHARS = 1000;
+
+export const normalizeRunwayPromptText = (value: string): string => {
+  const collapsed = String(value || '').replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= RUNWAY_PROMPT_TEXT_MAX_CHARS) {
+    return collapsed;
+  }
+
+  const hardLimit = RUNWAY_PROMPT_TEXT_MAX_CHARS - 3;
+  const truncated = collapsed.slice(0, hardLimit);
+  const preferredCut =
+    Math.max(
+      truncated.lastIndexOf('. '),
+      truncated.lastIndexOf(', '),
+      truncated.lastIndexOf('; '),
+      truncated.lastIndexOf(': '),
+      truncated.lastIndexOf(' ')
+    );
+  const cutIndex = preferredCut >= Math.floor(hardLimit * 0.7) ? preferredCut : hardLimit;
+  return `${truncated.slice(0, cutIndex).trim()}...`;
+};
+
 export const normalizeRunwayTaskStatus = (raw: unknown): RunwayTaskStatus => {
   const st = String(raw || '').trim().toUpperCase();
   if (st === 'SUCCEEDED' || st === 'SUCCESS') return 'SUCCEEDED';
@@ -102,11 +124,12 @@ export const extractFirstOutputUrl = (output: unknown): string | null => {
 export async function createRunwayImageToVideoTask(input: CreateRunwayImageToVideoTaskInput): Promise<{ id: string }> {
   const secret = getRunwaySecret();
   const baseUrl = getRunwayBaseUrl();
+  const promptText = normalizeRunwayPromptText(input.promptText);
 
   const body = {
     model: input.model,
     promptImage: input.promptImage,
-    promptText: input.promptText,
+    promptText,
     ratio: input.ratio || '1280:720',
     duration: Math.max(2, Math.min(10, Math.round(Number(input.duration ?? 5)))),
     ...(Number.isFinite(input.seed) ? { seed: Math.max(0, Math.floor(Number(input.seed))) } : {}),

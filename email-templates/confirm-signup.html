@@ -1,0 +1,115 @@
+<!--
+  KINETIC AI - Hesap Doğrulama / Confirm Signup
+  Supabase: Authentication > Emails > Templates > "Confirm signup" altına yapıştır.
+  Değişken: {{ .ConfirmationURL }}  (Supabase otomatik doldurur)
+  Not: E-posta istemcileri modern CSS desteklemediği için tablo + inline stil kullanıldı.
+-->
+<!DOCTYPE html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>KINETIC AI hesabını doğrula</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:#0a0a0f; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <!-- Önizleme metni (gelen kutusunda başlık altında görünür) -->
+    <div style="display:none; max-height:0; overflow:hidden; opacity:0;">
+      KINETIC AI hesabını aktifleştirmek için e-postanı doğrula.
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0f; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px; background-color:#13131c; border:1px solid #23232f; border-radius:18px; overflow:hidden;">
+
+            <!-- Üst marka şeridi -->
+            <tr>
+              <td style="background:linear-gradient(90deg,#7c3aed 0%,#4f46e5 50%,#06b6d4 100%); height:6px; line-height:6px; font-size:6px;">&nbsp;</td>
+            </tr>
+
+            <!-- Logo / başlık -->
+            <tr>
+              <td align="center" style="padding:40px 40px 8px 40px;">
+                <div style="font-size:26px; font-weight:800; letter-spacing:2px; color:#ffffff;">
+                  KINETIC<span style="color:#8b5cf6;"> AI</span>
+                </div>
+                <div style="margin-top:6px; font-size:12px; letter-spacing:3px; text-transform:uppercase; color:#6b7280;">
+                  AI Video & Reklam Stüdyosu
+                </div>
+              </td>
+            </tr>
+
+            <!-- Ana başlık -->
+            <tr>
+              <td align="center" style="padding:24px 40px 0 40px;">
+                <h1 style="margin:0; font-size:22px; line-height:1.3; color:#ffffff; font-weight:700;">
+                  Hoş geldin, son bir adım kaldı
+                </h1>
+                <p style="margin:14px 0 0 0; font-size:15px; line-height:1.6; color:#9ca3af;">
+                  Hesabını aktifleştirmek ve KINETIC AI ile ürünlerini saniyeler içinde
+                  sinematik reklamlara dönüştürmeye başlamak için e-posta adresini doğrula.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Buton -->
+            <tr>
+              <td align="center" style="padding:32px 40px 8px 40px;">
+                <table role="presentation" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center" style="border-radius:12px; background:linear-gradient(90deg,#7c3aed 0%,#4f46e5 100%);">
+                      <a href="{{ .ConfirmationURL }}"
+                         style="display:inline-block; padding:15px 42px; font-size:15px; font-weight:700; color:#ffffff; text-decoration:none; border-radius:12px;">
+                        E-postamı Doğrula
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Alternatif link -->
+            <tr>
+              <td align="center" style="padding:18px 40px 0 40px;">
+                <p style="margin:0; font-size:12px; line-height:1.6; color:#6b7280;">
+                  Buton çalışmazsa bu bağlantıyı tarayıcına yapıştır:
+                </p>
+                <p style="margin:8px 0 0 0; font-size:12px; line-height:1.5; word-break:break-all;">
+                  <a href="{{ .ConfirmationURL }}" style="color:#8b5cf6; text-decoration:underline;">{{ .ConfirmationURL }}</a>
+                </p>
+              </td>
+            </tr>
+
+            <!-- Ayırıcı -->
+            <tr>
+              <td style="padding:32px 40px 0 40px;">
+                <div style="border-top:1px solid #23232f; line-height:1px; font-size:1px;">&nbsp;</div>
+              </td>
+            </tr>
+
+            <!-- Güvenlik notu -->
+            <tr>
+              <td style="padding:20px 40px 40px 40px;">
+                <p style="margin:0; font-size:12px; line-height:1.6; color:#6b7280;">
+                  Bu hesabı sen oluşturmadıysan bu e-postayı yok sayabilirsin; herhangi bir işlem yapılmaz.
+                  Bağlantı güvenliğin için kısa süre sonra geçersiz olur.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Alt bilgi -->
+            <tr>
+              <td align="center" style="background-color:#0d0d14; padding:24px 40px;">
+                <p style="margin:0; font-size:12px; color:#4b5563;">
+                  &copy; KINETIC AI &middot; <a href="https://kinetic-ai.app" style="color:#6b7280; text-decoration:none;">kinetic-ai.app</a>
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

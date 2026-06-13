@@ -91,6 +91,14 @@ Use the project with this separation in mind:
 npm install
 ```
 
+### Configure Environment
+Copy the example file and fill in only the provider keys you need:
+```bash
+cp .env.example .env.local
+```
+
+Never commit `.env.local` or real provider credentials.
+
 ### Start Development Server
 ```bash
 npm run dev
@@ -123,7 +131,7 @@ npm test
 - `npm run personas:apply-clean`
 
 ## Environment Notes
-The app depends on provider-specific environment variables. Exact values depend on which flows you want enabled, but common categories are:
+The app depends on provider-specific environment variables. Start from `.env.example`; exact values depend on which flows you want enabled, but common categories are:
 
 - site/base URL config
 - Supabase config
@@ -134,6 +142,14 @@ The app depends on provider-specific environment variables. Exact values depend 
 - optional Hugging Face token/repo config
 
 Keep secrets in local environment files or deployment secrets, not in the repository.
+
+## Public Repository Notes
+This repository is prepared for public portfolio review:
+
+- real API keys and deployment secrets are excluded from Git
+- generated media and runtime persona data are ignored
+- local data files are treated as development artifacts
+- provider credentials should be configured through `.env.local` or deployment secrets
 
 ## Training Notes
 Persona training is built around FLUX LoRA workflows.

@@ -4,10 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { fetchPersonasFromApi } from '@/lib/persona-client';
 import type { PersonaSubjectType } from '@/lib/persona-subject';
+import type { User } from '@/lib/subscription';
 
 export type PersonaOption = {
   id: string;
   name: string;
+  trainingId?: string;
+  training_id?: string;
   triggerWord?: string;
   trigger_word?: string;
   modelId?: string;
@@ -38,15 +41,23 @@ export type PersonaOption = {
 
 const cachedPersonasByKey = new Map<string, PersonaOption[]>();
 
-export function usePersonaOptions(user: any) {
+export function usePersonaOptions(user?: User | null) {
   const [personaOptions, setPersonaOptions] = useState<PersonaOption[]>([]);
+  const userId = user?.id;
   const cacheKey = useMemo(() => {
-    const id = user?.id || 'anon';
+    const id = userId || 'anon';
     return `personaOptionsCache:${id}`;
-  }, [user?.id]);
+  }, [userId]);
   const isMounted = useRef(true);
 
   const refresh = useCallback(async (force = false) => {
+    // No identity yet → never request the shared pool (would expose other users).
+    if (!userId) {
+      cachedPersonasByKey.delete(cacheKey);
+      setPersonaOptions([]);
+      return;
+    }
+
     const cachedPersonas = cachedPersonasByKey.get(cacheKey) ?? null;
     if (cachedPersonas && !force) {
       setPersonaOptions(cachedPersonas);
@@ -67,7 +78,7 @@ export function usePersonaOptions(user: any) {
     }
 
     try {
-      const { ok, personas: personasPayload } = await fetchPersonasFromApi<PersonaOption>(user?.id);
+      const { ok, personas: personasPayload } = await fetchPersonasFromApi<PersonaOption>(userId);
       if (!ok && personasPayload.length === 0) {
         if (isMounted.current) setPersonaOptions([]);
         return;
@@ -86,13 +97,16 @@ export function usePersonaOptions(user: any) {
     } catch {
       if (isMounted.current) setPersonaOptions([]);
     }
-  }, [cacheKey, user?.id]);
+  }, [cacheKey, userId]);
 
   useEffect(() => {
     isMounted.current = true;
-    refresh();
+    const timeoutId = window.setTimeout(() => {
+      void refresh();
+    }, 0);
     return () => {
       isMounted.current = false;
+      window.clearTimeout(timeoutId);
     };
   }, [refresh]);
 

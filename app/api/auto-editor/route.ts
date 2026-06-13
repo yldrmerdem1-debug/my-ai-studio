@@ -1,230 +1,269 @@
 import { NextResponse } from 'next/server';
-import fsPromises from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { getFfmpeg } from '@/lib/ffmpeg-client';
-import { persistGeneratedBuffer } from '@/lib/generated-assets';
-import { getConfiguredSiteUrl } from '@/lib/site-url';
+import type {
+  AutoEditorComposerRequest,
+  AutoEditorLegacyRequest,
+  AutoEditorComposerResponse,
+  EditorAsset,
+  EditorCaptionMode,
+  EditorCampaignDuration,
+  EditorOutputAspectRatio,
+  EditorShotPlan,
+  EditorSession,
+} from '@/lib/ad-director';
+import { createDefaultShotPlan, createOutputVariants } from '@/lib/ad-director';
+import { cleanupResolvedEditorAssets, resolveEditorAssets } from '@/lib/auto-editor/assets';
+import { renderEditorTimeline } from '@/lib/auto-editor/render';
+import { planEditorTimeline } from '@/lib/auto-editor/timeline';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
 
-type AutoEditorRequest = {
-  videoUrl: string;
-  logoDataUrl?: string;
-  ctaText?: string;
-  captionsText?: string;
-  addCaptions?: boolean;
-  outputFormats?: string[];
+const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+const createId = (prefix: string) =>
+  `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`}`;
+
+const isClientAssetError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /asset|upload|private|local network|too large|public directory|invalid/i.test(message);
 };
 
-const isDataUrl = (value: string) => value.startsWith('data:');
+const normalizeOutputFormats = (formats: unknown): EditorOutputAspectRatio[] => {
+  if (!Array.isArray(formats) || formats.length === 0) return ['9:16'];
+  return Array.from(
+    new Set(
+      formats
+        .map((item) => safeTrim(item))
+        .filter((item): item is EditorOutputAspectRatio => item === '9:16' || item === '16:9')
+    )
+  );
+};
 
-const bufferFromDataUrl = (dataUrl: string) => {
-  const commaIndex = dataUrl.indexOf(',');
-  if (commaIndex === -1) {
-    throw new Error('Invalid data URL');
+const normalizeCampaignDuration = (value: unknown): EditorCampaignDuration => {
+  const numeric = Number(value);
+  if (numeric === 15 || numeric === 30 || numeric === 60) return numeric;
+  return 30;
+};
+
+const sanitizeAssets = (assets: unknown): EditorAsset[] => {
+  if (!Array.isArray(assets)) return [];
+  return assets
+    .map((asset, index): EditorAsset | null => {
+      if (!asset || typeof asset !== 'object') return null;
+      const record = asset as Record<string, unknown>;
+      const url = safeTrim(record.url);
+      const kind = safeTrim(record.kind) === 'video' ? 'video' : 'image';
+      const role = safeTrim(record.role) || (kind === 'video' ? 'hero' : 'product');
+      if (!url) return null;
+      return {
+        durationSec: typeof record.durationSec === 'number' ? record.durationSec : undefined,
+        id: safeTrim(record.id) || createId(`asset-${index}`),
+        isPrimary: Boolean(record.isPrimary),
+        kind,
+        label: safeTrim(record.label) || `Asset ${index + 1}`,
+        role: (
+          ['hero', 'broll', 'product', 'cover', 'logo', 'reference'].includes(role)
+            ? role
+            : (kind === 'video' ? 'hero' : 'product')
+        ) as EditorAsset['role'],
+        source: (
+          ['video', 'director', 'manual', 'brand', 'generated'].includes(safeTrim(record.source))
+            ? safeTrim(record.source)
+            : 'manual'
+        ) as EditorAsset['source'],
+        url,
+      };
+    })
+    .filter((asset): asset is EditorAsset => Boolean(asset));
+};
+
+const sanitizeShotPlan = (shots: unknown, targetDurationSec: EditorCampaignDuration): EditorShotPlan[] => {
+  if (!Array.isArray(shots) || shots.length === 0) {
+    return createDefaultShotPlan({ durationSec: targetDurationSec });
   }
-  const base64 = dataUrl.slice(commaIndex + 1);
-  return Buffer.from(base64, 'base64');
+
+  return shots
+    .map((shot, index): EditorShotPlan | null => {
+      if (!shot || typeof shot !== 'object') return null;
+      const record = shot as Record<string, unknown>;
+      const purpose = safeTrim(record.purpose);
+      const assetRoleHint = safeTrim(record.assetRoleHint);
+      return {
+        assetId: safeTrim(record.assetId) || undefined,
+        assetRoleHint: (
+          ['hero', 'broll', 'product', 'cover', 'logo', 'reference'].includes(assetRoleHint)
+            ? assetRoleHint
+            : 'hero'
+        ) as EditorShotPlan['assetRoleHint'],
+        durationSec: Math.max(1.5, Number(record.durationSec || 3)),
+        id: safeTrim(record.id) || createId(`shot-${index}`),
+        promptHint: safeTrim(record.promptHint) || 'Show the product clearly.',
+        purpose: (
+          ['hook', 'intro-card', 'product', 'demo', 'proof', 'cta'].includes(purpose)
+            ? purpose
+            : 'demo'
+        ) as EditorShotPlan['purpose'],
+        title: safeTrim(record.title) || `Scene ${index + 1}`,
+      };
+    })
+    .filter((shot): shot is EditorShotPlan => Boolean(shot));
 };
 
-const resolveBaseUrl = () => getConfiguredSiteUrl();
+const mapLegacyRequestToSession = (body: AutoEditorLegacyRequest): EditorSession => {
+  const now = new Date().toISOString();
+  const outputVariants = createOutputVariants(normalizeOutputFormats(body.outputFormats));
+  const targetDurationSec = 15;
+  const assets: EditorAsset[] = [
+    {
+      id: createId('asset-hero-video'),
+      isPrimary: true,
+      kind: 'video',
+      label: 'Raw Video Input',
+      role: 'hero',
+      source: 'video',
+      url: safeTrim(body.videoUrl),
+    },
+  ];
 
-const fetchToBuffer = async (url: string) => {
-  if (isDataUrl(url)) {
-    return bufferFromDataUrl(url);
-  }
-  if (url.startsWith('/api/')) {
-    const response = await fetch(`${resolveBaseUrl()}${url}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch api asset: ${response.status}`);
-    }
-    return Buffer.from(await response.arrayBuffer());
-  }
-  if (url.startsWith('/')) {
-    const filePath = path.join(process.cwd(), 'public', url.replace(/^\//, ''));
-    return await fsPromises.readFile(filePath);
-  }
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch asset: ${response.status}`);
-  }
-  return Buffer.from(await response.arrayBuffer());
-};
-
-const writeTempFile = async (buffer: Buffer, filename: string) => {
-  const tempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'auto-editor-'));
-  const filePath = path.join(tempDir, filename);
-  await fsPromises.writeFile(filePath, buffer);
-  return filePath;
-};
-
-const writePublicVideo = async (buffer: Buffer) => {
-  return persistGeneratedBuffer(buffer, {
-    prefix: 'generated/videos',
-    suggestedName: `ad-${crypto.randomUUID()}.mp4`,
-    contentType: 'video/mp4',
-  });
-};
-
-const formatSrtTime = (seconds: number) => {
-  const totalMs = Math.max(0, Math.floor(seconds * 1000));
-  const ms = totalMs % 1000;
-  const totalSeconds = Math.floor(totalMs / 1000);
-  const s = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const m = totalMinutes % 60;
-  const h = Math.floor(totalMinutes / 60);
-  const pad = (value: number, size = 2) => String(value).padStart(size, '0');
-  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
-};
-
-const buildSrt = (text: string, durationSeconds: number) => {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
-  if (!cleaned) return '';
-  const words = cleaned.split(' ');
-  const chunkSize = 3;
-  const chunks: string[] = [];
-  for (let i = 0; i < words.length; i += chunkSize) {
-    chunks.push(words.slice(i, i + chunkSize).join(' '));
-  }
-  const totalWords = words.length;
-  let cursor = 0;
-  const lines: string[] = [];
-  chunks.forEach((chunk, index) => {
-    const wordCount = chunk.split(' ').length;
-    const duration = (wordCount / totalWords) * durationSeconds;
-    const start = cursor;
-    const end = index === chunks.length - 1
-      ? durationSeconds
-      : Math.min(durationSeconds, cursor + duration);
-    cursor = end;
-    lines.push(`${index + 1}`);
-    lines.push(`${formatSrtTime(start)} --> ${formatSrtTime(end)}`);
-    lines.push(chunk);
-    lines.push('');
-  });
-  return lines.join('\n');
-};
-
-const escapeDrawtext = (text: string) => {
-  return text.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
-};
-
-const escapeSubtitlePath = (filePath: string) => {
-  return filePath.replace(/\\/g, '/').replace(/:/g, '\\:');
-};
-
-const getVideoDuration = async (filePath: string) => {
-  const ffmpeg = await getFfmpeg();
-  return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (error: Error | null, metadata: { format?: { duration?: number } }) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      const duration = Number(metadata.format?.duration || 0);
-      resolve(Number.isFinite(duration) && duration > 0 ? duration : 12);
+  if (safeTrim(body.logoDataUrl)) {
+    assets.push({
+      id: createId('asset-logo'),
+      kind: 'image',
+      label: 'Brand Logo',
+      role: 'logo',
+      source: 'brand',
+      url: safeTrim(body.logoDataUrl),
     });
-  });
+  }
+
+  const captionText = safeTrim(body.captionsText);
+  const ctaText = safeTrim(body.ctaText);
+  return {
+    assets,
+    captionMode: body.addCaptions && captionText ? 'full-script' : 'none',
+    captionText,
+    createdAt: now,
+    ctaPlan: {
+      durationSec: 2.5,
+      enabled: Boolean(ctaText),
+      position: 'ending-card',
+      text: ctaText || 'Shop Now',
+    },
+    hookPlan: {
+      emphasis: 'high',
+      preferredDurationSec: 2.5,
+      source: 'derived',
+      text: captionText.split(/\s+/).slice(0, 8).join(' ') || 'Lead with the strongest moment.',
+    },
+    id: createId('editor-session'),
+    notes: [],
+    outputVariants,
+    shotPlan: createDefaultShotPlan({
+      ctaText: ctaText || 'Shop Now',
+      durationSec: targetDurationSec,
+      hookText: captionText.split(/\s+/).slice(0, 8).join(' ') || 'Lead with the strongest moment.',
+      visualPrompt: captionText,
+    }),
+    targetDurationSec,
+    timelineStrategy: 'hook-first',
+    title: 'Legacy Auto-Editor Project',
+    updatedAt: now,
+  };
+};
+
+const sanitizeSession = (rawSession: EditorSession): EditorSession => {
+  const now = new Date().toISOString();
+  const assets = sanitizeAssets(rawSession.assets);
+  const targetDurationSec = normalizeCampaignDuration(rawSession.targetDurationSec);
+  const outputVariants = Array.isArray(rawSession.outputVariants) && rawSession.outputVariants.length > 0
+    ? rawSession.outputVariants
+    : createOutputVariants(['9:16', '16:9']);
+  const captionMode: EditorCaptionMode = rawSession.captionMode === 'none'
+    ? 'none'
+    : rawSession.captionMode === 'full-script'
+      ? 'full-script'
+      : 'segment-cues';
+
+  return {
+    ...rawSession,
+    assets,
+    captionMode,
+    captionText: safeTrim(rawSession.captionText),
+    createdAt: rawSession.createdAt || now,
+    ctaPlan: {
+      durationSec: Math.max(1.8, Number(rawSession.ctaPlan?.durationSec || 2.5)),
+      enabled: rawSession.ctaPlan?.enabled ?? true,
+      position: rawSession.ctaPlan?.position === 'lower-third' ? 'lower-third' : 'ending-card',
+      text: safeTrim(rawSession.ctaPlan?.text) || 'Shop Now',
+    },
+    hookPlan: {
+      emphasis: rawSession.hookPlan?.emphasis || 'high',
+      preferredDurationSec: Math.max(1.8, Number(rawSession.hookPlan?.preferredDurationSec || 2.5)),
+      source: rawSession.hookPlan?.source || 'derived',
+      text: safeTrim(rawSession.hookPlan?.text) || 'Lead with the strongest product moment.',
+    },
+    id: safeTrim(rawSession.id) || createId('editor-session'),
+    outputVariants,
+    shotPlan: sanitizeShotPlan(rawSession.shotPlan, targetDurationSec),
+    targetDurationSec,
+    timelineStrategy: rawSession.timelineStrategy || 'hook-first',
+    title: safeTrim(rawSession.title) || 'Auto-Editor Project',
+    updatedAt: now,
+  };
+};
+
+const resolveEditorSession = (body: AutoEditorComposerRequest | AutoEditorLegacyRequest) => {
+  if ('session' in body && body.session) {
+    return sanitizeSession(body.session);
+  }
+  return mapLegacyRequestToSession(body as AutoEditorLegacyRequest);
 };
 
 export async function POST(request: Request) {
+  let resolvedAssets: Awaited<ReturnType<typeof resolveEditorAssets>> = [];
   try {
-    const body = (await request.json()) as AutoEditorRequest;
-    const videoUrl = body?.videoUrl?.trim();
-    if (!videoUrl) {
-      return NextResponse.json({ error: 'videoUrl is required' }, { status: 400 });
+    const body = (await request.json()) as AutoEditorComposerRequest | AutoEditorLegacyRequest;
+    const session = resolveEditorSession(body);
+    const nonLogoAssets = session.assets.filter((asset) => asset.role !== 'logo');
+    if (nonLogoAssets.length === 0) {
+      return NextResponse.json({ error: 'At least one non-logo asset is required' }, { status: 400 });
     }
 
-    const videoBuffer = await fetchToBuffer(videoUrl);
-    const videoPath = await writeTempFile(videoBuffer, 'source.mp4');
-    const durationSeconds = await getVideoDuration(videoPath);
+    resolvedAssets = await resolveEditorAssets(session.assets);
+    const enrichedSession = sanitizeSession({
+      ...session,
+      assets: session.assets.map((asset) => {
+        const resolved = resolvedAssets.find((item) => item.id === asset.id);
+        return resolved
+          ? {
+              ...asset,
+              durationSec: resolved.durationSec,
+              height: resolved.height,
+              width: resolved.width,
+            }
+          : asset;
+      }),
+    });
+    const timeline = planEditorTimeline(enrichedSession);
+    const outputs = await renderEditorTimeline({
+      assets: resolvedAssets,
+      outputVariants: enrichedSession.outputVariants,
+      session: enrichedSession,
+      timeline,
+    });
 
-    const logoDataUrl = body?.logoDataUrl;
-    const logoPath = logoDataUrl ? await writeTempFile(bufferFromDataUrl(logoDataUrl), 'logo.png') : null;
-    const addCaptions = Boolean(body?.addCaptions);
-    const captionsText = body?.captionsText?.trim() || '';
-    const ctaText = body?.ctaText?.trim() || '';
-    const outputFormats = Array.isArray(body?.outputFormats) && body.outputFormats.length > 0
-      ? body.outputFormats
-      : ['9:16'];
-
-    let srtPath: string | null = null;
-    if (addCaptions && captionsText) {
-      const srtContent = buildSrt(captionsText, durationSeconds);
-      if (srtContent) {
-        srtPath = await writeTempFile(Buffer.from(srtContent, 'utf-8'), 'captions.srt');
-      }
-    }
-
-    const outputs: Record<string, string> = {};
-    for (const format of outputFormats) {
-      const outputPath = path.join(os.tmpdir(), `auto-${crypto.randomUUID()}.mp4`);
-      const scaleFilter = format === '16:9'
-        ? 'scale=1920:1080:force_original_aspect_ratio=cover,crop=1920:1080'
-        : 'scale=1080:1920:force_original_aspect_ratio=cover,crop=1080:1920';
-      let filter = `[0:v]${scaleFilter},format=yuv420p[base]`;
-      let currentLabel = 'base';
-      if (logoPath) {
-        filter += `;[1:v]scale=160:-1[logo]`;
-        filter += `;[${currentLabel}][logo]overlay=W-w-40:40[withlogo]`;
-        currentLabel = 'withlogo';
-      }
-      if (srtPath) {
-        const escapedSrt = escapeSubtitlePath(srtPath);
-        filter += `;[${currentLabel}]subtitles='${escapedSrt}'[captioned]`;
-        currentLabel = 'captioned';
-      }
-      let finalLabel = currentLabel;
-      if (ctaText) {
-        const escapedCta = escapeDrawtext(ctaText);
-        const ctaStart = Math.max(0, durationSeconds - 2.5);
-        filter += `;[${currentLabel}]drawbox=x=0:y=h-260:w=w:h=220:color=black@0.65:t=fill:enable='between(t,${ctaStart},${durationSeconds})'`;
-        filter += `,drawtext=text='${escapedCta}':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=h-200:box=1:boxcolor=black@0.0:enable='between(t,${ctaStart},${durationSeconds})'[outv]`;
-        finalLabel = 'outv';
-      }
-
-      const ffmpeg = await getFfmpeg();
-      const command = ffmpeg().input(videoPath);
-      if (logoPath) {
-        command.input(logoPath);
-      }
-      await new Promise<void>((resolve, reject) => {
-        command
-          .outputOptions([
-            '-y',
-            '-map',
-            finalLabel,
-            '-map',
-            '0:a?',
-            '-shortest',
-            '-movflags +faststart',
-            '-c:v libx264',
-            '-profile:v high',
-            '-preset medium',
-            '-b:v 6M',
-            '-maxrate 8M',
-            '-bufsize 12M',
-            '-c:a aac',
-          ])
-          .complexFilter(filter)
-          .on('end', () => resolve())
-          .on('error', (err: Error, stdout: string | null, stderr: string | null) => {
-            reject(new Error(`FFmpeg packaging failed: ${err?.message || err}\n${stderr || stdout || ''}`));
-          })
-          .save(outputPath);
-      });
-
-      const outputBuffer = await fsPromises.readFile(outputPath);
-      const publicUrl = await writePublicVideo(outputBuffer);
-      outputs[format] = publicUrl;
-    }
-
-    return NextResponse.json({ outputs });
-  } catch (error: any) {
+    return NextResponse.json({
+      outputs,
+      session: enrichedSession,
+      timeline,
+    } satisfies AutoEditorComposerResponse);
+  } catch (error: unknown) {
     console.error('Auto-editor error:', error);
-    return NextResponse.json({ error: error.message || 'Failed to package video' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to package video' },
+      { status: isClientAssetError(error) ? 400 : 500 }
+    );
+  } finally {
+    await cleanupResolvedEditorAssets(resolvedAssets);
   }
 }

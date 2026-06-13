@@ -29,8 +29,12 @@ export async function POST(request: NextRequest) {
     const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
     const imageBase64 = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
 
-    // Use fofr/luma-dream-machine or kling v2.5 for video generation
-    const modelOptions = ['fofr/luma-dream-machine', 'kwaivgi/kling-v2.5-turbo-pro'];
+    // Prefer Seedance 2.0, then keep older video engines as fallbacks.
+    const modelOptions = [
+      process.env.REPLICATE_SEEDANCE_2_0_MODEL || 'bytedance/seedance-2.0',
+      'fofr/luma-dream-machine',
+      'kwaivgi/kling-v2.5-turbo-pro',
+    ];
     let prediction;
     let lastError;
 

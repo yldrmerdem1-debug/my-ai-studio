@@ -2,9 +2,10 @@
 
 import { useState, useRef, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuroraBackground from '@/components/AuroraBackground';
 import PricingModal from '@/components/PricingModal';
 import Link from 'next/link';
-import { Image as ImageIcon, Upload, Sparkles, Loader2, Eraser, Camera, User, Wand2 } from 'lucide-react';
+import { Upload, Loader2, Eraser, Camera, User, Wand2 } from 'lucide-react';
 import { useToast } from '@/hooks/useToast';
 import PreviewArea from '@/components/PreviewArea';
 import { usePersona } from '@/hooks/usePersona';
@@ -13,6 +14,12 @@ import { canUsePersona } from '@/lib/subscription';
 import { isPublicFaceSwapEnabled } from '@/lib/feature-flags';
 
 type ToolMode = 'background-remove' | 'studio-background' | 'face-identity' | null;
+type FaceSwapStatusPayload = {
+  error?: string;
+  output?: unknown;
+  predictionId?: string;
+  status?: string;
+};
 
 export default function StudioPage() {
   const { showToast } = useToast();
@@ -22,8 +29,11 @@ export default function StudioPage() {
   const faceSwapUiEnabled = isPublicFaceSwapEnabled();
   const [selectedTool, setSelectedTool] = useState<ToolMode>(null);
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
+  const [sourceImageUrl, setSourceImageUrl] = useState<string | null>(null);
   const [targetImage, setTargetImage] = useState<File | null>(null);
+  const [targetImageUrl, setTargetImageUrl] = useState<string | null>(null);
   const [backgroundPrompt, setBackgroundPrompt] = useState('');
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -59,6 +69,39 @@ export default function StudioPage() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  useEffect(() => {
+    if (!uploadedImage) {
+      setUploadedImageUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(uploadedImage);
+    setUploadedImageUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [uploadedImage]);
+
+  useEffect(() => {
+    if (!sourceImage) {
+      setSourceImageUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(sourceImage);
+    setSourceImageUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [sourceImage]);
+
+  useEffect(() => {
+    if (!targetImage) {
+      setTargetImageUrl(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(targetImage);
+    setTargetImageUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [targetImage]);
 
   const getPersonaId = () => {
     return identityMode === 'persona' ? persona?.id : undefined;
@@ -176,8 +219,8 @@ export default function StudioPage() {
         
         showToast('Background removed successfully!', 'success');
       }
-    } catch (error: any) {
-      showToast(error.message || 'Failed to remove background', 'error');
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Failed to remove background', 'error');
     } finally {
       setIsProcessing(false);
     }
@@ -230,22 +273,23 @@ export default function StudioPage() {
       }
 
       const data = await response.json();
-      if (data.imageUrl) {
-        setResultImage(data.imageUrl);
+      const outputUrl = data.imageUrl || data.output;
+      if (typeof outputUrl === 'string' && outputUrl) {
+        setResultImage(outputUrl);
         
         // Auto-save to My Assets
         if (typeof window !== 'undefined') {
           const { saveImageAsset } = await import('@/lib/assets-storage');
-          saveImageAsset(data.imageUrl, `Studio Background - ${new Date().toLocaleDateString()}`, {
-            model: 'runwayml/stable-diffusion-inpainting',
+          saveImageAsset(outputUrl, `Studio Background - ${new Date().toLocaleDateString()}`, {
+            model: data.engine || 'bria/generate-background',
             prompt: backgroundPrompt,
           });
         }
         
         showToast('Studio background created successfully!', 'success');
       }
-    } catch (error: any) {
-      showToast(error.message || 'Failed to create studio background', 'error');
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Failed to create studio background', 'error');
     } finally {
       setIsProcessing(false);
     }
@@ -300,9 +344,9 @@ export default function StudioPage() {
               return;
             }
             const statusResponse = await fetch(`/api/face-identity/status?predictionId=${data.predictionId}`);
-            const statusData = await statusResponse.json().catch(() => ({}));
+            const statusData: FaceSwapStatusPayload = await statusResponse.json().catch(() => ({}));
             if (!statusResponse.ok) {
-              throw new Error((statusData as any).error || 'Failed to check processing status');
+              throw new Error(statusData.error || 'Failed to check processing status');
             }
             if (statusData.status === 'succeeded' && statusData.output) {
               clearInterval(pollInterval);
@@ -321,17 +365,17 @@ export default function StudioPage() {
               setIsProcessing(false);
               showToast('Face swap failed: ' + (statusData.error || 'Unknown error'), 'error');
             }
-          } catch (pollError: any) {
+          } catch (pollError: unknown) {
             clearInterval(pollInterval);
             setIsProcessing(false);
-            showToast(pollError?.message || 'Failed to check processing status', 'error');
+            showToast(pollError instanceof Error ? pollError.message : 'Failed to check processing status', 'error');
           }
         }, 2000);
       } else {
         throw new Error(data.error || 'Failed to start face swap');
       }
-    } catch (error: any) {
-      showToast(error.message || 'Failed to swap faces', 'error');
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Failed to swap faces', 'error');
     } finally {
       if (!startedPolling) setIsProcessing(false);
     }
@@ -358,6 +402,7 @@ export default function StudioPage() {
 
   return (
     <div className="relative min-h-screen bg-black">
+      <AuroraBackground />
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
       <PricingModal isOpen={isPricingModalOpen} onClose={() => setIsPricingModalOpen(false)} />
 
@@ -498,12 +543,12 @@ export default function StudioPage() {
                         <Upload className="w-5 h-5" />
                         {uploadedImage ? 'Change Image' : 'Upload Image'}
                       </button>
-                      {uploadedImage && (
+                      {uploadedImageUrl && (
                         <div className="mt-4">
-                          <img
-                            src={URL.createObjectURL(uploadedImage)}
-                            alt="Uploaded"
-                            className="w-full rounded-lg"
+                          <div
+                            aria-hidden="true"
+                            className="h-64 w-full rounded-lg bg-cover bg-center"
+                            style={{ backgroundImage: `url(${uploadedImageUrl})` }}
                           />
                         </div>
                       )}
@@ -527,7 +572,7 @@ export default function StudioPage() {
                     </div>
                   </div>
                   <PreviewArea
-                    originalImage={uploadedImage ? URL.createObjectURL(uploadedImage) : null}
+                    originalImage={uploadedImageUrl}
                     resultImage={resultImage}
                     isProcessing={isProcessing}
                     processingMessage="Removing background..."
@@ -554,12 +599,12 @@ export default function StudioPage() {
                         <Upload className="w-5 h-5" />
                         {uploadedImage ? 'Change Image' : 'Upload Image'}
                       </button>
-                      {uploadedImage && (
+                      {uploadedImageUrl && (
                         <div className="mt-4">
-                          <img
-                            src={URL.createObjectURL(uploadedImage)}
-                            alt="Uploaded"
-                            className="w-full rounded-lg"
+                          <div
+                            aria-hidden="true"
+                            className="h-64 w-full rounded-lg bg-cover bg-center"
+                            style={{ backgroundImage: `url(${uploadedImageUrl})` }}
                           />
                         </div>
                       )}
@@ -612,7 +657,7 @@ export default function StudioPage() {
                     </div>
                   </div>
                   <PreviewArea
-                    originalImage={uploadedImage ? URL.createObjectURL(uploadedImage) : null}
+                    originalImage={uploadedImageUrl}
                     resultImage={resultImage}
                     isProcessing={isProcessing}
                     processingMessage="Creating studio background..."
@@ -643,12 +688,12 @@ export default function StudioPage() {
                           <Upload className="w-5 h-5" />
                           {sourceImage ? 'Change Source' : 'Upload Source Image'}
                         </button>
-                        {sourceImage && (
+                        {sourceImageUrl && (
                           <div className="mt-4">
-                            <img
-                              src={URL.createObjectURL(sourceImage)}
-                              alt="Source"
-                              className="w-full rounded-lg"
+                            <div
+                              aria-hidden="true"
+                              className="h-64 w-full rounded-lg bg-cover bg-center"
+                              style={{ backgroundImage: `url(${sourceImageUrl})` }}
                             />
                           </div>
                         )}
@@ -671,12 +716,12 @@ export default function StudioPage() {
                           <Upload className="w-5 h-5" />
                           {targetImage ? 'Change Target' : 'Upload Target Image'}
                         </button>
-                        {targetImage && (
+                        {targetImageUrl && (
                           <div className="mt-4">
-                            <img
-                              src={URL.createObjectURL(targetImage)}
-                              alt="Target"
-                              className="w-full rounded-lg"
+                            <div
+                              aria-hidden="true"
+                              className="h-64 w-full rounded-lg bg-cover bg-center"
+                              style={{ backgroundImage: `url(${targetImageUrl})` }}
                             />
                           </div>
                         )}
@@ -725,7 +770,7 @@ export default function StudioPage() {
                     </div>
                   </div>
                   <PreviewArea
-                    originalImage={targetImage ? URL.createObjectURL(targetImage) : null}
+                    originalImage={targetImageUrl}
                     resultImage={resultImage}
                     isProcessing={isProcessing}
                     processingMessage="Swapping faces..."

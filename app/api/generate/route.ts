@@ -1,23 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
 import { translate } from '@vitalets/google-translate-api';
-import sharp from 'sharp';
+import { rebuildStudioBackground } from '@/lib/background-rebuild';
 import { requirePremium, requirePersonaAccess } from '@/lib/persona-guards';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 // Map action types to Replicate models
 // Updated to use the specific models requested by the user
 const MODEL_MAP: Record<string, string> = {
-  'remove-background': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
-  'studio-background': 'runwayml/stable-diffusion-inpainting:95b7223104132405a9ae91cc677285bc5eb997834bd2349c2b5a1ae1b1717942', // Inpainting model with mask support
-  'mask-generation': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg for mask generation
-  'background-removal': 'lucataco/remove-bg', // Updated: Use lucataco/remove-bg
+  'remove-background': 'lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1',
+  'studio-background': 'bria/generate-background:ba437a62603f1205b253fd7bad0d0b5c326d7857242d11753c0cbcd2c5008602',
+  'mask-generation': 'lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1',
+  'background-removal': 'lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1',
   '3d-motion': 'stability-ai/stable-video-diffusion:3f0457e4619daac51203dedb472816fd4af51f3149fa7a9e0b5ffcf1b8172438',
   'ad-script': 'meta/llama-3.1-8b-instruct:af1c688b4a10d836358128ace4b7821950d6cbcd3d4532511146196b3b7c5c2b',
   'generate-image': 'black-forest-labs/flux-2-klein-9b-base-lora',
 };
 
-const extractUrl = (output: any): string | null => {
+type PredictionState = {
+  error?: unknown;
+  id: string;
+  output?: unknown;
+  status?: string | null;
+};
+
+type ApiErrorLike = {
+  message?: string;
+  response?: {
+    data?: unknown;
+  };
+  status?: number;
+  statusText?: string;
+};
+
+const extractUrl = (output: unknown): string | null => {
   if (!output) return null;
   if (typeof output === 'string' && output.startsWith('http')) return output;
   if (Array.isArray(output)) {
@@ -51,6 +67,16 @@ const normalizeAspectRatio = (value: unknown): string => {
   return raw;
 };
 
+const stableSeedFromParts = (...parts: unknown[]) => {
+  const input = parts.map((part) => String(part ?? '')).join('|');
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
 const toImageArray = (value: unknown): string[] => {
   if (!value) return [];
   if (Array.isArray(value)) {
@@ -71,7 +97,7 @@ const resolvePersonaLoraWeightUrl = async ({
   if (!client) return '';
 
   const candidates: string[] = [];
-  const extractFromRow = (row: Record<string, any> | null | undefined) => {
+  const extractFromRow = (row: Record<string, unknown> | null | undefined) => {
     if (!row) return;
     const value = String(
       row.lora_weight_url
@@ -103,7 +129,7 @@ const resolvePersonaLoraWeightUrl = async ({
         ? await query.order('created_at', { ascending: false }).limit(1)
         : await query.limit(1);
       if (error || !Array.isArray(data) || data.length === 0) continue;
-      extractFromRow(data[0] as Record<string, any>);
+      extractFromRow(data[0] as Record<string, unknown>);
     } catch {
       // Ignore missing table/column mismatch to keep backward compatibility.
     }
@@ -124,18 +150,18 @@ export async function GET(request: NextRequest) {
     }
 
     const replicate = new Replicate({ auth: apiToken.trim() });
-    const prediction = await replicate.predictions.get(predictionId);
-    const url = extractUrl((prediction as any)?.output);
+    const prediction = await replicate.predictions.get(predictionId) as PredictionState;
+    const url = extractUrl(prediction.output);
 
     return NextResponse.json({
       predictionId,
-      status: (prediction as any)?.status || 'starting',
+      status: prediction.status || 'starting',
       output: url || null,
-      error: (prediction as any)?.error || null,
+      error: prediction.error || null,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return NextResponse.json(
-      { error: error?.message || 'Failed to fetch prediction status' },
+      { error: error instanceof Error ? error.message : 'Failed to fetch prediction status' },
       { status: 500 }
     );
   }
@@ -186,7 +212,7 @@ async function translateToEnglish(text: string): Promise<string> {
         setTimeout(() => reject(new Error('Translation timeout')), 5000)
       );
       
-      const result = await Promise.race([translationPromise, timeoutPromise]) as any;
+      const result = await Promise.race([translationPromise, timeoutPromise]) as { text?: string };
       const translatedText = result.text || text;
       
       console.log('Translated:', translatedText);
@@ -195,10 +221,13 @@ async function translateToEnglish(text: string): Promise<string> {
     
     // Default: return original text if we can't determine
     return text;
-  } catch (error: any) {
+  } catch (error: unknown) {
     // If translation fails (service down, rate limit, etc.), use original text
     // This ensures the app continues to work even if translation service is unavailable
-    console.warn('Translation service unavailable, using original text:', error.message);
+    console.warn(
+      'Translation service unavailable, using original text:',
+      error instanceof Error ? error.message : error
+    );
     console.warn('Original text will be sent to Replicate (may work if it\'s already English)');
     return text;
   }
@@ -292,7 +321,7 @@ export async function POST(request: NextRequest) {
 
     // Create prediction
     console.log('Creating Replicate prediction...');
-    let prediction: any;
+    let prediction: PredictionState | null = null;
     
     if (action === 'ad-script') {
       // Translate user prompt to English if provided, otherwise use default
@@ -322,7 +351,9 @@ export async function POST(request: NextRequest) {
       imagePrompt = await translateToEnglish(imagePrompt);
 
       const requestImages = [...toImageArray(images), ...toImageArray(image)];
-      const userId = String((user as any)?.id || '').trim();
+      const userId = typeof user === 'object' && user && 'id' in user
+        ? String((user as { id?: unknown }).id || '').trim()
+        : '';
       const loraWeightUrl = await resolvePersonaLoraWeightUrl({
         userId,
         personaId: String(personaId || '').trim(),
@@ -335,13 +366,14 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const modelInput: Record<string, any> = {
+      const modelInput: Record<string, unknown> = {
         prompt: imagePrompt,
         lora_weights: [loraWeightUrl],
         aspect_ratio: normalizeAspectRatio(aspectRatio) || (requestImages.length > 0 ? 'match_input_image' : '9:16'),
         output_megapixels: 2,
         output_format: 'jpg',
         output_quality: 95,
+        seed: stableSeedFromParts(imagePrompt, personaId, userId, normalizeAspectRatio(aspectRatio), loraWeightUrl, requestImages.join(',')),
       };
       if (requestImages.length > 0) {
         modelInput.images = requestImages;
@@ -371,128 +403,18 @@ export async function POST(request: NextRequest) {
         );
       }
     } else if (action === 'studio-background') {
-      // PROPER INPAINTING APPROACH: Use mask-based inpainting for 100% subject preservation
-      // Step 1: Extract subject mask using background removal (rembg)
-      // Step 2: Generate proper mask from transparent image (white = inpaint background, black = preserve subject)
-      // Step 3: Use inpainting model with image + mask to replace ONLY the background
-      
-      console.log('Step 1: Extracting subject mask using background removal...');
-      
-      // Extract the subject with transparent background using rembg
-      const maskPrediction = await replicate.predictions.create({
-        version: MODEL_MAP['background-removal'],
-        input: {
-          image: image,
-        },
+      const result = await rebuildStudioBackground({
+        apiToken: apiToken.trim(),
+        image: String(image || ''),
+        prompt: typeof prompt === 'string' ? prompt : '',
+        triggerWord: typeof triggerWord === 'string' ? triggerWord : '',
       });
-      
-      // Poll for mask extraction
-      let maskResult: any = null;
-      let maskAttempts = 0;
-      const maxMaskAttempts = 30;
-      
-      while (maskAttempts < maxMaskAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        maskResult = await replicate.predictions.get(maskPrediction.id);
-        
-        if (maskResult.status === 'succeeded' && maskResult.output) {
-          break;
-        }
-        if (maskResult.status === 'failed' || maskResult.status === 'canceled') {
-          throw new Error(`Mask extraction failed: ${maskResult.error || 'Unknown error'}`);
-        }
-        maskAttempts++;
-      }
-      
-      if (!maskResult || maskResult.status !== 'succeeded' || !maskResult.output) {
-        throw new Error('Failed to extract subject mask');
-      }
-      
-      const subjectImageWithTransparency = Array.isArray(maskResult.output) ? maskResult.output[0] : maskResult.output;
-      console.log('✓ Step 1 complete: Subject extracted with transparent background');
-      
-      // Step 2: Convert transparent PNG to proper black/white mask
-      // The mask format for inpainting: white = area to inpaint (background), black = area to preserve (subject)
-      // We'll convert the transparent subject image to a mask where:
-      // - Transparent areas (background) = WHITE (inpaint these)
-      // - Opaque areas (subject) = BLACK (preserve these)
-      
-      console.log('Step 2: Converting transparent image to proper inpainting mask...');
-      
-      try {
-        // Fetch the transparent image and convert it to a mask
-        const transparentImageResponse = await fetch(subjectImageWithTransparency);
-        if (!transparentImageResponse.ok) {
-          throw new Error(`Failed to fetch transparent image: ${transparentImageResponse.statusText}`);
-        }
-        
-        const transparentImageBuffer = Buffer.from(await transparentImageResponse.arrayBuffer());
-        
-        // Convert transparent PNG to black/white mask for inpainting
-        // Logic:
-        // - Extract alpha channel: transparent (alpha=0) = black, opaque (alpha=255) = white
-        // - Negate: black (0) → white (255), white (255) → black (0)
-        // Result: Background (transparent) = white (inpaint), Subject (opaque) = black (preserve)
-        const maskBuffer = await sharp(transparentImageBuffer)
-          .ensureAlpha() // Ensure alpha channel exists (adds alpha if missing)
-          .extractChannel(3) // Extract alpha channel (channel 3 in RGBA = alpha)
-          .negate({ alpha: false }) // Invert brightness: 0→255, 255→0 (don't invert alpha channel itself)
-          .greyscale() // Ensure it's greyscale
-          .png()
-          .toBuffer();
-        
-        // Convert mask buffer to base64 data URL for Replicate
-        const maskBase64 = `data:image/png;base64,${maskBuffer.toString('base64')}`;
-        console.log('✓ Step 2 complete: Proper inpainting mask generated');
-        console.log('  - White areas = background (will be inpainted/replaced)');
-        console.log('  - Black areas = subject (will be preserved 100%)');
-        
-        // Step 3: Translate prompt to English
-        let backgroundPrompt = prompt || 'professional studio background, clean white background, professional photography, high quality, studio lighting, seamless background';
-        console.log('Original prompt (any language):', backgroundPrompt);
-        backgroundPrompt = await translateToEnglish(backgroundPrompt);
-        console.log('Translated prompt (English):', backgroundPrompt);
-        
-        // Build prompt that STRICTLY describes ONLY the background
-        // Important: Don't mention the subject at all - only describe the background
-        let backgroundOnlyPrompt = `${backgroundPrompt}, high quality, professional photography, empty background, no subjects, no people, no objects, just the background environment`;
-        
-        // Prepend trigger word if provided (for persona consistency in background style)
-        if (triggerWord && triggerWord.trim()) {
-          backgroundOnlyPrompt = `${triggerWord} ${backgroundOnlyPrompt}`;
-          console.log('Using trigger word for persona:', triggerWord);
-        }
-        
-        console.log('Step 3: Using mask-based inpainting to replace background only...');
-        console.log('Using inpainting model:', model);
-        console.log('Background prompt (subject-free):', backgroundOnlyPrompt);
-        console.log('Mask format: White = background to replace, Black = subject to preserve');
-        
-        // Use runwayml/stable-diffusion-inpainting with proper mask
-        // The mask we generated has:
-        // - White pixels = background area (will be inpainted)
-        // - Black pixels = subject area (will be preserved 100%)
-        prediction = await replicate.predictions.create({
-          version: model, // runwayml/stable-diffusion-inpainting
-          input: {
-            image: image, // Original full image
-            mask: maskBase64, // Proper black/white mask (white = inpaint background, black = preserve subject)
-            prompt: backgroundOnlyPrompt, // What to generate in the white masked area (background only)
-            num_inference_steps: 50, // More steps for better quality and subject preservation
-            guidance_scale: 7.5, // Standard guidance
-            num_outputs: 1,
-          },
-        });
-        
-        console.log('✓ Mask-based inpainting started with proper mask');
-        console.log('✓ Subject will be 100% preserved (black mask areas)');
-        console.log('✓ Only background will be replaced (white mask areas)');
-        
-      } catch (maskError: any) {
-        console.error('Error generating mask:', maskError);
-        throw new Error(`Failed to generate inpainting mask: ${maskError.message}`);
-      }
-      
+      return NextResponse.json({
+        output: result.imageUrl,
+        imageUrl: result.imageUrl,
+        engine: result.engine,
+        providerImageUrl: result.providerImageUrl,
+      });
     } else if (action === '3d-motion') {
       // Translate any user prompt to English for better AI interpretation
       let videoPrompt = prompt || '3D motion effect with depth and movement, cinematic, smooth transitions';
@@ -570,7 +492,7 @@ export async function POST(request: NextRequest) {
         attempts++;
         if (attempts < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, pollInterval));
-          prediction = await replicate.predictions.get(prediction.id);
+          prediction = await replicate.predictions.get(prediction.id) as PredictionState;
         }
         continue;
       }
@@ -579,7 +501,7 @@ export async function POST(request: NextRequest) {
       attempts++;
       if (attempts < maxAttempts) {
         await new Promise(resolve => setTimeout(resolve, pollInterval));
-        prediction = await replicate.predictions.get(prediction.id);
+        prediction = await replicate.predictions.get(prediction.id) as PredictionState;
       }
     }
 
@@ -595,17 +517,22 @@ export async function POST(request: NextRequest) {
       { status: 504 }
     );
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const apiError = (error || {}) as ApiErrorLike;
     console.error('Replicate API error:', error);
     console.error('Error details:', {
-      message: error.message,
-      status: error.status,
-      statusText: error.statusText,
-      response: error.response?.data,
+      message: apiError.message,
+      status: apiError.status,
+      statusText: apiError.statusText,
+      response: apiError.response?.data,
     });
     
     // Check if it's an authentication error
-    if (error.message?.includes('401') || error.message?.includes('Unauthorized') || error.message?.includes('Unauthenticated')) {
+    if (
+      apiError.message?.includes('401')
+      || apiError.message?.includes('Unauthorized')
+      || apiError.message?.includes('Unauthenticated')
+    ) {
       return NextResponse.json(
         { 
           error: 'Authentication failed. Please ensure REPLICATE_API_TOKEN is set in your .env.local file and restart your dev server.',
@@ -616,7 +543,7 @@ export async function POST(request: NextRequest) {
     }
     
     return NextResponse.json(
-      { error: error.message || 'Failed to process request' },
+      { error: apiError.message || 'Failed to process request' },
       { status: 500 }
     );
   }

@@ -7,6 +7,8 @@ import { PassThrough } from 'node:stream';
 
 import { ensureFalConfigured, hasFalKey } from '@/lib/fal';
 import {
+  FAL_FAST_TRAINING_ENGINE_LABEL,
+  FAL_FAST_TRAINING_MODEL,
   FAL_PORTRAIT_TRAINING_ENGINE_LABEL,
   FAL_PORTRAIT_TRAINING_MODEL,
   getPersonaTrainingProfile,
@@ -34,7 +36,7 @@ const isGender = (value: unknown): value is 'male' | 'female' => value === 'male
 const DEFAULT_REPLICATE_FLUX_TRAINING_VERSION = '26dce37af90b9d997eeb970d92e47de3064d46c300504ae376c75bef6a9022d2';
 const DEFAULT_REPLICATE_FLUX_TRAINING_DESTINATION = 'yldrmerdem1-debug/persona-flux';
 const REPLICATE_FLUX_TRAINING_ENGINE_DESCRIPTION =
-  'Quality-first Replicate FLUX LoRA trainer used as the only non-human training path and the fallback path for human portraits.';
+  'Recommended Replicate FLUX LoRA trainer used for balanced quality, consistency, and production wait time.';
 
 type TrainingStartResult = {
   provider: 'fal' | 'replicate';
@@ -69,6 +71,7 @@ const resolveReplicateFluxTrainingConfig = () => {
   const trainingDestination = String(
     process.env.REPLICATE_FLUX_TRAINING_DESTINATION_MODEL
     || process.env.REPLICATE_FLUX_TRAINING_DESTINATION
+    || process.env.REPLICATE_TRAINING_MODEL
     || DEFAULT_REPLICATE_FLUX_TRAINING_DESTINATION
   ).trim();
 
@@ -79,13 +82,19 @@ const resolveReplicateFluxTrainingConfig = () => {
   };
 };
 
-const resolveFalTrainingConfig = (): FalTrainingConfig => {
-  return {
-    engineLabel: FAL_PORTRAIT_TRAINING_ENGINE_LABEL,
-    engineDescription: 'Best identity retention for real people and close-up portrait work.',
-    modelId: FAL_PORTRAIT_TRAINING_MODEL,
-  };
-};
+const resolveFalTrainingConfig = (subjectType: PersonaSubjectType): FalTrainingConfig => (
+  subjectType === 'human'
+    ? {
+        engineLabel: FAL_PORTRAIT_TRAINING_ENGINE_LABEL,
+        engineDescription: 'Best identity retention for real people and close-up portrait work.',
+        modelId: FAL_PORTRAIT_TRAINING_MODEL,
+      }
+    : {
+        engineLabel: FAL_FAST_TRAINING_ENGINE_LABEL,
+        engineDescription: 'Fast LoRA training for products, animals, and custom subjects.',
+        modelId: FAL_FAST_TRAINING_MODEL,
+      }
+);
 
 const buildReplicateFluxTrainingInput = ({
   inputImages,
@@ -260,19 +269,29 @@ const uploadReferenceImages = async ({
 const buildFalTrainingInput = ({
   defaultSteps,
   inputImages,
+  modelId,
   triggerWord,
 }: {
   defaultSteps: number;
   inputImages: string;
+  modelId: string;
   triggerWord: string;
-}) => ({
-  images_data_url: inputImages,
-  trigger_phrase: triggerWord,
-  steps: defaultSteps,
-  multiresolution_training: true,
-  subject_crop: true,
-  create_masks: false,
-});
+}) => (
+  modelId === FAL_PORTRAIT_TRAINING_MODEL
+    ? {
+        images_data_url: inputImages,
+        trigger_phrase: triggerWord,
+        steps: defaultSteps,
+        multiresolution_training: true,
+        subject_crop: true,
+        create_masks: false,
+      }
+    : {
+        images_data_url: inputImages,
+        trigger_word: triggerWord,
+        steps: Math.max(800, Math.min(1200, defaultSteps)),
+      }
+);
 
 const buildTrainingInputSource = ({
   zipBuffer,
@@ -327,14 +346,12 @@ const startFalTraining = async ({
   triggerWord: string;
 }): Promise<TrainingStartResult> => {
   const fal = ensureFalConfigured();
-  if (subjectType !== 'human') {
-    throw new Error('fal.ai portrait trainer is only supported for human personas.');
-  }
-  const falTrainingConfig = resolveFalTrainingConfig();
+  const falTrainingConfig = resolveFalTrainingConfig(subjectType);
   const submitted = await fal.queue.submit(falTrainingConfig.modelId, {
     input: buildFalTrainingInput({
       defaultSteps: profile.defaultSteps,
       inputImages,
+      modelId: falTrainingConfig.modelId,
       triggerWord,
     }) as any,
   } as any);
@@ -499,7 +516,7 @@ const resolveTrainingStart = async ({
     throw new Error(String(lastError));
   }
   if (profile.provider === 'replicate') {
-    throw new Error('Quality-first non-human persona training requires REPLICATE_API_TOKEN.');
+    throw new Error('Recommended non-human persona training requires REPLICATE_API_TOKEN.');
   }
   throw new Error('No training provider is configured. Add FAL_KEY or REPLICATE_API_TOKEN.');
 };
@@ -520,7 +537,7 @@ const buildDryRunPayload = ({
   const strategyOrder = resolveTrainingStrategyOrder(profile);
   const replicateToken = safeTrim(process.env.REPLICATE_API_TOKEN);
   const falTrainingConfig = profile.provider === 'fal'
-    ? resolveFalTrainingConfig()
+    ? resolveFalTrainingConfig(subjectType)
     : null;
   const fallbackChain: Array<{
     strategy: TrainingStrategy;
@@ -545,6 +562,7 @@ const buildDryRunPayload = ({
     ? buildFalTrainingInput({
         defaultSteps: profile.defaultSteps,
         inputImages: 'data:application/zip;base64,...',
+        modelId: falTrainingConfig?.modelId || FAL_PORTRAIT_TRAINING_MODEL,
         triggerWord,
       })
     : buildReplicateFluxTrainingInput({

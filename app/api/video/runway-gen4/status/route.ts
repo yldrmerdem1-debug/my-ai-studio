@@ -16,11 +16,17 @@ export async function GET(request: NextRequest) {
     const status = normalizeRunwayTaskStatus(task?.status);
 
     if (status !== 'SUCCEEDED') {
+      const failure = (task as any)?.failure || (task as any)?.error || null;
+      const failureCode = (task as any)?.failureCode || (task as any)?.errorCode || null;
       return NextResponse.json({
         success: true,
         task_id: taskId,
         status,
         runwayStatus: task?.status || null,
+        error: failure || (status === 'FAILED' ? 'Runway generation failed.' : null),
+        failure,
+        failureCode,
+        output: task ?? null,
         videoUrl: null,
       });
     }

@@ -3,6 +3,7 @@ export const CINEMATIC_VISUAL_SUFFIX =
 
 export type VideoEngineKey =
   | 'grok'
+  | 'seedance_2_0'
   | 'veo'
   | 'runway'
   | 'kling_3_pro'
@@ -18,19 +19,19 @@ export const VIDEO_QUALITY_PRESET_LABELS: Record<
 > = {
   '480p': {
     title: '480p',
-    hint: 'Hizli',
+    hint: 'Fast',
   },
   '720p': {
     title: '720p',
-    hint: 'Standart HD',
+    hint: 'Standard HD',
   },
   '1080p': {
     title: '1080p',
-    hint: 'Yuksek kalite',
+    hint: 'High quality',
   },
   '1584x672': {
     title: '1584x672',
-    hint: 'Runway en yuksek',
+    hint: 'Runway max',
   },
 };
 
@@ -48,6 +49,14 @@ export const VIDEO_ENGINES_CONFIG: Record<
   grok: {
     supportedDurations: [5, 10, 15],
     defaultDuration: 5,
+    mode: 'select',
+    supportedQualities: ['480p', '720p', '1080p'],
+    defaultQuality: '720p',
+  },
+  seedance_2_0: {
+    // ByteDance Seedance 2.0 supports 4-15 seconds; keep the UX presets aligned with ad clip lengths.
+    supportedDurations: [5, 10, 15],
+    defaultDuration: 10,
     mode: 'select',
     supportedQualities: ['480p', '720p', '1080p'],
     defaultQuality: '720p',
@@ -98,3 +107,13 @@ export const VIDEO_ENGINES_CONFIG: Record<
     defaultQuality: '720p',
   },
 };
+
+export const VIDEO_ENGINES_WITH_DIRECT_POLLING = new Set<VideoEngineKey>([
+  'runway',
+  'kling_3_pro',
+  'kling_turbo',
+  'kling_2_6',
+]);
+
+export const supportsDirectVideoPolling = (engine: unknown): boolean =>
+  VIDEO_ENGINES_WITH_DIRECT_POLLING.has(String(engine || '').trim().toLowerCase() as VideoEngineKey);

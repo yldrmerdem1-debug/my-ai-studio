@@ -30,8 +30,9 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -43,7 +44,14 @@ next-env.d.ts
 # usage logs (optional local)
 data/video-usage.jsonl
 
+# personal files
+Erdem_Yildirim_CV.*
+
 # runtime persona data and generated media
 data/personas.json
 data/personas.tmp-*.json
+data/personas_clean.json
+data/assets.json
+data/video-jobs.json
+!data/.gitkeep
 public/generated/**

@@ -49,11 +49,15 @@ export async function GET(request: NextRequest) {
         });
       }
       if (normalized === 'FAILED') {
+        const failure = (task as any)?.failure || (task as any)?.error || 'Runway failed';
+        const failureCode = (task as any)?.failureCode || (task as any)?.errorCode || null;
         return NextResponse.json({
           status: 'failed',
           progress: 0,
-          statusMessage: 'Runway generation failed.',
-          error: (task as any)?.error || 'Runway failed',
+          statusMessage: failureCode ? `Runway generation failed (${failureCode}).` : 'Runway generation failed.',
+          error: failure,
+          failure,
+          failureCode,
           videoUrl: null,
           output: task ?? null,
         });
@@ -72,16 +76,24 @@ export async function GET(request: NextRequest) {
     if (videoId.startsWith('job_')) {
       const job = await getJob(videoId);
       if (!job) {
+        // Job record can lag behind the initial POST response during dev reload/HMR or cold start.
+        // Keep the client polling instead of failing immediately.
         return NextResponse.json({
-          status: 'starting',
-          progress: 0,
-          statusMessage: 'Job not found or expired.',
+          status: 'processing',
+          progress: 0.05,
+          statusMessage: 'Video job is starting...',
           error: null,
           videoUrl: null,
           output: null,
         });
       }
-      if (job.status === 'failed') {
+      const result = (job.result || {}) as Record<string, unknown>;
+      const storedVideoUrl =
+        typeof result.videoUrl === 'string' && result.videoUrl.trim()
+          ? result.videoUrl.trim()
+          : null;
+
+      if (job.status === 'failed' && !storedVideoUrl) {
         return NextResponse.json({
           status: 'failed',
           progress: 0,
@@ -92,11 +104,18 @@ export async function GET(request: NextRequest) {
         });
       }
 
-      const result = (job.result || {}) as Record<string, unknown>;
-      const storedVideoUrl =
-        typeof result.videoUrl === 'string' && result.videoUrl.trim()
-          ? result.videoUrl.trim()
-          : null;
+      if (job.status === 'succeeded' && storedVideoUrl) {
+        return NextResponse.json({
+          status: 'succeeded',
+          progress: 1,
+          statusMessage: 'Video generation complete!',
+          error: null,
+          videoUrl: storedVideoUrl,
+          output: result,
+          audioMerged: Boolean((result as { audioMerged?: boolean }).audioMerged),
+        });
+      }
+
       const nestedVideoId =
         typeof result.videoId === 'string' && result.videoId.trim()
           ? result.videoId.trim()
@@ -138,6 +157,20 @@ export async function GET(request: NextRequest) {
           && (nestedData?.status === 'failed' || nestedData?.status === 'canceled' || nestedData?.status === 'error')
         ) {
           const message = String(nestedData?.error || nestedData?.statusMessage || 'Generation failed');
+          const retryableNested = /\b(not found|throttl|timeout|temporarily|starting|processing)\b/i.test(message);
+          if (retryableNested) {
+            return NextResponse.json({
+              status: 'processing',
+              progress: typeof nestedData?.progress === 'number' ? nestedData.progress : 0.5,
+              statusMessage: nestedData?.statusMessage || 'Generating video...',
+              error: null,
+              videoUrl: null,
+              output: {
+                ...result,
+                nestedStatus: nestedData || null,
+              },
+            });
+          }
           await setJob(videoId, {
             status: 'failed',
             error: message,
@@ -220,7 +253,40 @@ export async function GET(request: NextRequest) {
         );
       }
       fal.config({ credentials: key });
-      const st = await fal.queue.status(model, { requestId, logs: false } as any);
+      let st: any = null;
+      try {
+        st = await fal.queue.status(model, { requestId, logs: false } as any);
+      } catch (error: any) {
+        const body = error?.body ?? error?.response?.data ?? null;
+        const detail =
+          body?.detail
+          || body?.error
+          || body?.message
+          || error?.message
+          || 'Fal status check failed';
+        const message = typeof detail === 'string' ? detail : JSON.stringify(detail);
+        console.error('Fal status check error:', {
+          model,
+          requestId,
+          status: error?.status,
+          body,
+          message,
+        });
+        return NextResponse.json({
+          status: 'failed',
+          progress: 0,
+          statusMessage: message,
+          error: message,
+          videoUrl: null,
+          output: {
+            provider: 'fal',
+            model,
+            requestId,
+            status: error?.status ?? null,
+            body,
+          },
+        });
+      }
       const status = String((st as any)?.status || '').toUpperCase();
       if (status === 'COMPLETED') {
         const result = await fal.queue.result(model, { requestId } as any);
@@ -362,6 +428,29 @@ export async function GET(request: NextRequest) {
 
   } catch (error: any) {
     console.error('Status check error:', error);
+    const providerStatus = Number(error?.status || error?.response?.status || 0);
+    if (providerStatus === 422) {
+      const body = error?.body ?? error?.response?.data ?? null;
+      const detail =
+        body?.detail
+        || body?.error
+        || body?.message
+        || error?.message
+        || 'Video provider rejected the status request.';
+      const message = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      return NextResponse.json({
+        error: message,
+        status: 'failed',
+        progress: 0,
+        statusMessage: message,
+        videoUrl: null,
+        output: {
+          providerStatus,
+          requestId: error?.requestId ?? null,
+          body,
+        },
+      });
+    }
     return NextResponse.json(
       { 
         error: error.message || 'Failed to check video generation status',

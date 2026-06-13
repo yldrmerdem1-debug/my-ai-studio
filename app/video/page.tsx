@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
+import AuroraBackground from '@/components/AuroraBackground';
 import PricingModal from '@/components/PricingModal';
 import { ImagePlus, Loader2, Plus, X, Video, Sparkles, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
 import { usePersona } from '@/hooks/usePersona';
@@ -9,6 +10,7 @@ import VideoPlayerWithAudio from '@/components/VideoPlayerWithAudio';
 import {
   VIDEO_ENGINES_CONFIG,
   VIDEO_QUALITY_PRESET_LABELS,
+  supportsDirectVideoPolling,
   type VideoEngineKey,
   type VideoQualityPreset,
 } from '@/lib/constants';
@@ -17,6 +19,16 @@ import { isPremiumUser } from '@/lib/subscription';
 import { usePersonaOptions, type PersonaOption } from '@/hooks/usePersonaOptions';
 import { fileToDataUrl } from '@/lib/client/file-data-url';
 import { useVideoGenerationPolling } from '@/app/video/_hooks/useVideoGenerationPolling';
+import {
+  AUTO_EDITOR_SESSION_KEY,
+  createDefaultShotPlan,
+  createEditorSessionFromVideo,
+  createEditorSessionFromDirectorPlan,
+  createOutputVariants,
+  type EditorCampaignDuration,
+  type EditorSession,
+  type DirectorStoredPayload,
+} from '@/lib/ad-director';
 
 type RunwayModel =
   | 'gen4.5'
@@ -32,23 +44,101 @@ type SelectedAssets = {
   imagePreview: string | null;
 };
 
+const getPersonaImageUrl = (persona: PersonaOption | null) =>
+  persona?.image_url || persona?.imageUrl || '';
 
-type DirectorPlanPayload = {
-  scenario: {
-    title?: string;
-    hook?: string;
-    angle?: string;
-    plan?: {
-      visual_prompt?: string;
-      audio_script?: string;
-      voice_emotion?: string;
-      sfx_prompt?: string;
-      camera_movement?: string;
-    };
-  };
-  inputs?: Record<string, string>;
-  createdAt?: string;
+const comparableUrlPath = (value?: string | null) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return raw.split('?')[0];
+  }
 };
+
+const getPersonaModelId = (persona: PersonaOption | null) =>
+  persona?.model_id || persona?.modelId || persona?.training_id || persona?.trainingId || '';
+
+const getPersonaTriggerWord = (persona: PersonaOption | null) =>
+  persona?.trigger_word || persona?.triggerWord || '';
+
+type VideoEngineItem = {
+  id: VideoEngineKey;
+  name: string;
+  hint?: string;
+  accent: string;
+  tile: string;
+};
+
+const VIDEO_ENGINE_ITEMS: VideoEngineItem[] = [
+  { id: 'grok', name: 'Standard', hint: 'Grok · hızlı', accent: 'border-blue-500/40 bg-blue-500/10 text-blue-100', tile: 'from-slate-600 to-slate-900' },
+  { id: 'seedance_2_0', name: 'Seedance 2.0', hint: 'Sesli + sinematik hareket', accent: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100', tile: 'from-cyan-400 to-blue-600' },
+  { id: 'veo', name: 'Premium · Veo 3.1', hint: 'Reklam yedeği', accent: 'border-purple-500/40 bg-purple-500/10 text-purple-100', tile: 'from-fuchsia-500 to-indigo-600' },
+  { id: 'runway', name: 'Ultra Premium · Runway', hint: 'Ürün reklamları', accent: 'border-amber-500/40 bg-amber-500/10 text-amber-100', tile: 'from-amber-400 to-orange-600' },
+  { id: 'kling_3_pro', name: 'Kling 3.0 Pro', hint: 'Ürün reklamları', accent: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100', tile: 'from-emerald-400 to-teal-600' },
+  { id: 'kling_turbo', name: 'ProTurbo', hint: 'Kling 2.5 Turbo Pro', accent: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100', tile: 'from-lime-400 to-emerald-600' },
+  { id: 'kling_2_6', name: 'Kling 2.6', hint: 'Ürün reklamları', accent: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100', tile: 'from-teal-400 to-emerald-700' },
+  { id: 'kling_avatar_v2', name: 'Kling Avatar v2', hint: 'Dudak senkronu', accent: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100', tile: 'from-green-400 to-emerald-700' },
+];
+
+function EngineGlyph({ id }: { id: VideoEngineKey }) {
+  const cls = 'h-4 w-4';
+  switch (id) {
+    case 'grok':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round">
+          <path d="M5 4l14 16M19 4L5 20" />
+        </svg>
+      );
+    case 'seedance_2_0':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+          <path d="M3 12h2M7 7v10M11 3v18M15 7v10M19 10v4M21 12h0" />
+        </svg>
+      );
+    case 'veo':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="currentColor">
+          <path d="M12 2c.7 5 2.3 6.6 7.3 7.3-5 .7-6.6 2.3-7.3 7.3-.7-5-2.3-6.6-7.3-7.3C9.7 8.6 11.3 7 12 2z" />
+        </svg>
+      );
+    case 'runway':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="currentColor">
+          <path d="M8 5.5v13l11-6.5z" />
+        </svg>
+      );
+    case 'kling_turbo':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="currentColor">
+          <path d="M13 2L4 14h6l-1 8 9-12h-6z" />
+        </svg>
+      );
+    case 'kling_avatar_v2':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="none" stroke="currentColor" strokeWidth={2}>
+          <circle cx="12" cy="8" r="3.2" />
+          <path d="M5 20c1.5-3.6 4-5.2 7-5.2s5.5 1.6 7 5.2" />
+        </svg>
+      );
+    case 'kling_2_6':
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="none" stroke="currentColor" strokeWidth={2}>
+          <rect x="4" y="5" width="16" height="14" rx="2" />
+          <path d="M9 5v14M15 5v14" />
+        </svg>
+      );
+    case 'kling_3_pro':
+    default:
+      return (
+        <svg viewBox="0 0 24 24" className={cls} fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M7 4v16M7 12l8-8M9 12l8 8" />
+        </svg>
+      );
+  }
+}
 
 export default function VideoPage() {
   const { user } = usePersona();
@@ -60,7 +150,10 @@ export default function VideoPage() {
   >('grok');
   const [selectedQuality, setSelectedQuality] = useState<VideoQualityPreset>(VIDEO_ENGINES_CONFIG.grok.defaultQuality);
   const [runwayModel, setRunwayModel] = useState<RunwayModel>('gen4.5');
+  const [settingsTab, setSettingsTab] = useState<'engine' | 'format' | 'persona'>('engine');
   const [durationSec, setDurationSec] = useState<number>(VIDEO_ENGINES_CONFIG.grok.defaultDuration);
+  const [generationMode, setGenerationMode] = useState<'single' | 'long-ad'>('single');
+  const [longAdDuration, setLongAdDuration] = useState<EditorCampaignDuration>(30);
   const { personaOptions } = usePersonaOptions(user);
   const [isGenerating, setIsGenerating] = useState(false);
   const [hasGenerated, setHasGenerated] = useState(false);
@@ -72,13 +165,14 @@ export default function VideoPage() {
   const [pendingVideoId, setPendingVideoId] = useState<string | null>(null);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
-  const [directorPlan, setDirectorPlan] = useState<DirectorPlanPayload | null>(null);
+  const [directorPlan, setDirectorPlan] = useState<DirectorStoredPayload | null>(null);
   const [selected, setSelected] = useState<SelectedAssets>({
     selectedPersona: null,
     imageFile: null,
     imagePreview: null,
   });
   const selectedIdRef = useRef<string | null>(null);
+  const directorPlanAppliedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationRunRef = useRef(0);
   const pendingRunIdRef = useRef(0);
@@ -129,7 +223,7 @@ export default function VideoPage() {
     const raw = localStorage.getItem('adDirectorPlan');
     if (!raw) return;
     try {
-      const parsed = JSON.parse(raw) as DirectorPlanPayload;
+      const parsed = JSON.parse(raw) as DirectorStoredPayload;
       const plan = parsed?.scenario?.plan;
       if (plan?.visual_prompt) {
         setPrompt(plan.visual_prompt);
@@ -139,6 +233,80 @@ export default function VideoPage() {
       console.warn('Failed to parse director plan from storage', error);
     }
   }, []);
+
+  useEffect(() => {
+    if (!directorPlan || directorPlanAppliedRef.current) return;
+
+    const nextEngine = directorPlan.recommendations?.recommendedEngine;
+    const nextQuality = directorPlan.recommendations?.recommendedQuality;
+    const nextDuration = directorPlan.recommendations?.recommendedDuration;
+    const nextReferenceImageUrl =
+      directorPlan.recommendations?.referenceImageUrl
+      || directorPlan.inputs?.productImageUrl
+      || directorPlan.sourceContext?.resolvedProductImageUrl
+      || '';
+    const nextPersonaId = directorPlan.inputs?.persona?.id;
+
+    if (nextEngine) {
+      setSelectedEngine(nextEngine);
+    }
+    if (nextQuality) {
+      setSelectedQuality(nextQuality);
+    }
+    if (typeof nextDuration === 'number') {
+      setDurationSec(nextDuration);
+    }
+    if (nextReferenceImageUrl) {
+      setUploadedImageUrl(nextReferenceImageUrl);
+    }
+    if (nextPersonaId) {
+      const matchedPersona = personaOptions.find(option => option.id === nextPersonaId);
+      if (!matchedPersona) {
+        return;
+      }
+      selectedIdRef.current = matchedPersona.id;
+      setSelected(prev => ({
+        ...prev,
+        selectedPersona: matchedPersona,
+      }));
+    }
+
+    directorPlanAppliedRef.current = true;
+  }, [directorPlan, personaOptions]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !videoUrl) return;
+    localStorage.setItem('latestRawVideoUrl', videoUrl);
+    import('@/lib/assets-storage')
+      .then(({ saveVideoAsset }) => {
+        saveVideoAsset(videoUrl, `AI Video - ${new Date().toLocaleDateString()}`, {
+          model: selectedEngine,
+          prompt,
+          quality: selectedQuality,
+          personaId: selected.selectedPersona?.id || selected.selectedPersona?.modelId || undefined,
+        });
+      })
+      .catch((error) => console.warn('Failed to save video asset', error));
+    const editorSession = createEditorSessionFromVideo({
+      captionText: directorPlan?.scenario?.plan?.audio_script || '',
+      directorPlan,
+      personaName: selected.selectedPersona?.name || undefined,
+      prompt,
+      rawVideoUrl: videoUrl,
+      referenceImageUrl: uploadedImageUrl || undefined,
+      selectedEngine,
+      selectedQuality,
+    });
+    localStorage.setItem(AUTO_EDITOR_SESSION_KEY, JSON.stringify(editorSession));
+  }, [
+    directorPlan,
+    prompt,
+    selected.selectedPersona?.name,
+    selectedEngine,
+    selectedQuality,
+    uploadedImageUrl,
+    videoUrl,
+  ]);
 
     const handleSelectPersona = (persona: any) => {
       const clickedId = persona?.id || persona?.modelId || persona?.model_id || persona?._id;
@@ -230,7 +398,148 @@ export default function VideoPage() {
     setFaceSwapError,
     setGeneratedImageUrl,
     setErrorMessage,
+    setActiveVideoTab,
   }), []);
+  const hasVideoReady = Boolean(videoUrl?.trim());
+  const showGeneratingPanel = isGenerating && !hasVideoReady;
+  const showVideoPanel = hasVideoReady;
+  const usesDirectVideoPolling = supportsDirectVideoPolling(selectedEngine);
+
+  const createLongAdSession = (params: {
+    persona: PersonaOption | null;
+    promptText: string;
+  }): EditorSession => {
+    const persona = params.persona;
+    const baseSession: EditorSession = directorPlan
+      ? createEditorSessionFromDirectorPlan(directorPlan)
+      : (() => {
+          const now = new Date().toISOString();
+          return {
+            assets: [],
+            captionMode: 'segment-cues' as const,
+            captionText: '',
+            createdAt: now,
+            ctaPlan: {
+              durationSec: 2.5,
+              enabled: true,
+              position: 'ending-card' as const,
+              text: 'Shop Now',
+            },
+            directorPlan: null,
+            hookPlan: {
+              emphasis: 'high' as const,
+              preferredDurationSec: 2.5,
+              source: 'manual' as const,
+              text: params.promptText,
+            },
+            id: `video-factory-long-ad-${Date.now()}`,
+            notes: [],
+            outputVariants: createOutputVariants(['9:16']),
+            shotPlan: createDefaultShotPlan({
+              durationSec: longAdDuration,
+              hookText: params.promptText,
+              visualPrompt: params.promptText,
+            }),
+            targetDurationSec: longAdDuration,
+            timelineStrategy: 'hook-first' as const,
+            title: 'Video Factory Long Ad',
+            updatedAt: now,
+          } satisfies EditorSession;
+        })();
+
+    return {
+      ...baseSession,
+      captionText: baseSession.captionText || directorPlan?.scenario?.plan?.audio_script || '',
+      metadata: {
+        ...(baseSession.metadata || {}),
+        engine: selectedEngine,
+        identityLock: Boolean(persona || uploadedImageUrl || directorPlan?.recommendations?.referenceImageUrl),
+        personaId: persona?.id,
+        personaImageUrl: getPersonaImageUrl(persona) || undefined,
+        personaModelId: getPersonaModelId(persona) || undefined,
+        personaName: persona?.name,
+        quality: selectedQuality,
+        referenceImageUrl:
+          uploadedImageUrl
+          || directorPlan?.recommendations?.referenceImageUrl
+          || directorPlan?.sourceContext?.resolvedProductImageUrl
+          || undefined,
+        strictProductLock: Boolean(
+          uploadedImageUrl
+          || directorPlan?.recommendations?.referenceImageUrl
+          || directorPlan?.sourceContext?.resolvedProductImageUrl
+        ),
+        triggerWord: getPersonaTriggerWord(persona) || undefined,
+      },
+      outputVariants: createOutputVariants(['9:16']),
+      shotPlan: createDefaultShotPlan({
+        ctaText: baseSession.ctaPlan.text,
+        durationSec: longAdDuration,
+        hookText: baseSession.hookPlan.text || params.promptText,
+        productTitle: baseSession.metadata?.productTitle || baseSession.title,
+        strategy: baseSession.timelineStrategy,
+        visualPrompt: directorPlan?.scenario?.plan?.visual_prompt || params.promptText,
+      }),
+      targetDurationSec: longAdDuration,
+      updatedAt: new Date().toISOString(),
+    };
+  };
+
+  const handleGenerateLongAd = async (promptText: string, persona: PersonaOption | null) => {
+    if (!user?.id) {
+      throw new Error('User authentication required before generating a long ad.');
+    }
+    const session = createLongAdSession({ persona, promptText });
+    setStatusMessage(`Generating ${longAdDuration}s multi-shot scenes...`);
+    const scenesResponse = await fetchWithTimeout('/api/auto-editor/generate-scenes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        engine: selectedEngine,
+        qualityPreset: selectedQuality,
+        session,
+        userId: user.id,
+      }),
+    }, 900000);
+    const scenesData = await scenesResponse.json().catch(() => ({}));
+    if (!scenesResponse.ok) {
+      throw new Error(scenesData.error || scenesData.details || 'Failed to generate long ad scenes');
+    }
+    if (!scenesData.session) {
+      throw new Error('Scene generation finished but did not return an editor session');
+    }
+
+    setStatusMessage('Composing final long ad...');
+    const composeResponse = await fetchWithTimeout('/api/auto-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: scenesData.session }),
+    }, 900000);
+    const composeData = await composeResponse.json().catch(() => ({}));
+    if (!composeResponse.ok) {
+      throw new Error(composeData.error || composeData.details || 'Failed to compose long ad');
+    }
+    const outputs = composeData.outputs || {};
+    const finalUrl =
+      outputs['9:16 - Clean / No Text']
+      || outputs['9:16 - With Captions & CTA']
+      || outputs['16:9 - Clean / No Text']
+      || outputs['16:9 - With Captions & CTA']
+      || outputs['9:16']
+      || outputs['16:9']
+      || Object.values(outputs)[0];
+    if (!finalUrl || typeof finalUrl !== 'string') {
+      throw new Error('Long ad render finished but no output URL was returned');
+    }
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(AUTO_EDITOR_SESSION_KEY, JSON.stringify(composeData.session || scenesData.session));
+      localStorage.setItem('latestRawVideoUrl', finalUrl);
+    }
+    setVideoUrl(finalUrl);
+    setAudioMerged(false);
+    setGeneratedImageUrl(uploadedImageUrl);
+    setHasGenerated(true);
+  };
 
   useVideoGenerationPolling({
     pendingVideoId,
@@ -261,6 +570,11 @@ export default function VideoPage() {
     const finalTrainingBaseModel = (exactPersona as any)?.training_base_model
       || (exactPersona as any)?.trainingBaseModel
       || '';
+    const explicitReferenceForRequest =
+      uploadedImageUrl
+      && comparableUrlPath(uploadedImageUrl) !== comparableUrlPath(finalImageUrl)
+        ? uploadedImageUrl
+        : undefined;
     const finalTrigger = exactPersona
       ? (exactPersona as any)?.trigger_word
         || (exactPersona as any)?.triggerWord
@@ -291,6 +605,10 @@ export default function VideoPage() {
       : prompt.trim();
     let handedOffToPolling = false;
     try {
+      if (generationMode === 'long-ad') {
+        await handleGenerateLongAd(resolvedPrompt, exactPersona || null);
+        return;
+      }
       setStatusMessage('Generating video + voice...');
       const videoResponse = await fetchWithTimeout('/api/generate-video', {
         method: 'POST',
@@ -298,7 +616,9 @@ export default function VideoPage() {
         body: JSON.stringify({
           prompt: resolvedPrompt,
           ...(durationSec > 0 ? { duration: durationSec } : {}),
-          referenceImageUrl: uploadedImageUrl,
+          referenceImageUrl: explicitReferenceForRequest,
+          hasUserReferenceImage: Boolean(explicitReferenceForRequest),
+          referenceImageSource: explicitReferenceForRequest ? 'user-upload' : undefined,
           personaImageUrl: finalImageUrl,
           personaUrl: finalImageUrl,
           personaModelId: finalModelId,
@@ -326,7 +646,7 @@ export default function VideoPage() {
           ) : undefined,
           detectedCharacters: faceSwapAllowedForUser && enableFaceSwap && faceSwapConsent && Object.keys(actorPhotoUrls).length > 0 ? detectedCharacters : undefined,
           user,
-          async: true,
+          async: !usesDirectVideoPolling,
         }),
       });
       const videoData = await videoResponse.json().catch(() => ({}));
@@ -335,6 +655,7 @@ export default function VideoPage() {
       }
       if (videoData.imageUrl && generationRunRef.current === currentRun) {
         setGeneratedImageUrl(videoData.imageUrl);
+        setStatusMessage('Persona görseli hazır, video motoruna gönderildi...');
       }
       let rawVideoUrl = videoData.videoUrl as string | undefined;
       if (!rawVideoUrl) {
@@ -372,16 +693,18 @@ export default function VideoPage() {
         }
       }
       
+      setErrorMessage('');
       setVideoUrl(finalVideoUrl);
       setAudioMerged(Boolean(videoData.audioMerged));
       setHasGenerated(true);
+      setIsGenerating(false);
       setActiveVideoTab('swapped');
       
       // Store generation params for face swap
       setLastGenerationParams({
         exactPersona,
         prompt: resolvedPrompt,
-        referenceImageUrl: uploadedImageUrl,
+        referenceImageUrl: explicitReferenceForRequest,
         personaImageUrl: finalImageUrl,
         personaUrl: finalImageUrl,
         personaModelId: finalModelId,
@@ -492,10 +815,11 @@ export default function VideoPage() {
 
   return (
     <div className="min-h-screen bg-black text-white relative">
+      <AuroraBackground />
       <Sidebar onSubscriptionClick={() => setIsPricingModalOpen(true)} />
-      <main className="ml-64 px-6 py-10 relative">
+      <main className="ml-64 px-6 py-10 relative z-10">
         {/* Background ambient glow when generating */}
-        {isGenerating && (
+        {showGeneratingPanel && (
           <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
             <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-[100px] animate-pulse"></div>
             <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-[100px] animate-[pulse_3s_ease-in-out_infinite]"></div>
@@ -517,8 +841,13 @@ export default function VideoPage() {
                   AI Director plan loaded
                 </div>
                 <p className="mt-2 text-xs text-emerald-200/80">
-                  Prompt and dialogue are pre-filled from your selected scenario.
+                  Prompt is pre-filled, and recommended engine settings were applied when possible.
                 </p>
+                {directorPlan.recommendations && (
+                  <p className="mt-2 text-xs text-emerald-200/80">
+                    {directorPlan.recommendations.recommendedEngine} / {directorPlan.recommendations.recommendedDuration || 'auto'}s / {directorPlan.recommendations.recommendedQuality}
+                  </p>
+                )}
               </div>
             )}
             <div className="mb-4 flex flex-wrap gap-2">
@@ -555,6 +884,58 @@ export default function VideoPage() {
                 {errorMessage}
               </div>
             )}
+            {!isGenerating && !hasGenerated && (
+              <div className="mb-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-semibold text-white">Generation mode</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Single clip uses the selected Video Factory engine directly. Long ad creates multiple short scenes, chains last-frame references, then composes the final video.
+                </p>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => setGenerationMode('single')}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      generationMode === 'single'
+                        ? 'border-[#00d9ff]/60 bg-[#00d9ff]/10 text-cyan-100'
+                        : 'border-white/10 bg-black/30 text-gray-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold">Single clip</span>
+                    <span className="mt-1 block text-xs text-gray-500">One short generated video.</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGenerationMode('long-ad')}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      generationMode === 'long-ad'
+                        ? 'border-[#fbbf24]/60 bg-[#fbbf24]/10 text-yellow-100'
+                        : 'border-white/10 bg-black/30 text-gray-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold">Long ad</span>
+                    <span className="mt-1 block text-xs text-gray-500">30-60s multi-shot ad from chained scenes.</span>
+                  </button>
+                </div>
+                {generationMode === 'long-ad' && (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {[30, 60].map((durationOption) => (
+                      <button
+                        key={durationOption}
+                        type="button"
+                        onClick={() => setLongAdDuration(durationOption as EditorCampaignDuration)}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
+                          longAdDuration === durationOption
+                            ? 'border-[#fbbf24]/60 bg-[#fbbf24]/15 text-[#fbbf24]'
+                            : 'border-white/10 bg-black/30 text-gray-300 hover:bg-white/10'
+                        }`}
+                      >
+                        {durationOption}s final ad
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="relative rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.05)] focus-within:border-white/20 focus-within:ring-2 focus-within:ring-[#7c3aed]/40 focus-within:shadow-[0_0_45px_rgba(124,58,237,0.25),0_0_90px_rgba(59,130,246,0.18)]">
               {!isGenerating && !hasGenerated && (
                 <button
@@ -587,20 +968,47 @@ export default function VideoPage() {
                       }
                       className="rounded-xl bg-gradient-to-r from-[#00d9ff] to-[#0099cc] px-6 py-3 text-sm font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Generate Video
+                      {generationMode === 'long-ad' ? `Generate ${longAdDuration}s Ad` : 'Generate Video'}
                     </button>
                   </div>
                 </>
               )}
 
-              {isGenerating && (
-                <div className="flex flex-col items-center justify-center gap-6 rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 via-black/60 to-[#0b0b0b] px-6 py-20 shadow-[0_0_50px_rgba(124,58,237,0.1)] relative overflow-hidden min-h-[400px]">
+              {showGeneratingPanel && (
+                <div className="flex flex-col items-center justify-center gap-6 rounded-2xl border border-white/10 bg-gradient-to-br from-[#07111f] via-black/70 to-[#12091f] px-6 py-14 shadow-[0_0_50px_rgba(124,58,237,0.1)] relative overflow-hidden min-h-[520px]">
                   {/* Animated Background Glow */}
-                  <div className="absolute inset-0 bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 opacity-50 blur-3xl animate-pulse pointer-events-none"></div>
+                  <div className="absolute -left-24 top-10 h-64 w-64 rounded-full bg-cyan-500/20 blur-3xl animate-pulse pointer-events-none"></div>
+                  <div className="absolute -right-20 bottom-0 h-72 w-72 rounded-full bg-purple-500/20 blur-3xl animate-pulse pointer-events-none"></div>
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.08),transparent_35%)] pointer-events-none"></div>
                   
                   {/* Progress Indicator */}
-                  <div className="relative z-10 flex flex-col items-center gap-8 w-full max-w-md">
-                    <div className="relative flex h-32 w-32 items-center justify-center rounded-full bg-black/50 border border-white/10 shadow-[0_0_40px_rgba(124,58,237,0.2)]">
+                  <div className="relative z-10 flex w-full max-w-2xl flex-col items-center gap-7">
+                    {generatedImageUrl && (
+                      <div className="group w-full overflow-hidden rounded-[28px] border border-emerald-300/35 bg-black/70 shadow-[0_0_55px_rgba(16,185,129,0.2),0_0_90px_rgba(59,130,246,0.12)]">
+                        <div className="relative">
+                          <div
+                            className="aspect-video w-full bg-cover bg-center transition-transform duration-700 group-hover:scale-[1.02]"
+                            style={{ backgroundImage: `url(${generatedImageUrl})` }}
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-transparent to-black/10" />
+                          <div className="absolute left-4 top-4 rounded-full border border-emerald-300/40 bg-emerald-400/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-100 shadow-[0_0_25px_rgba(16,185,129,0.25)]">
+                            Anchor Ready
+                          </div>
+                          <div className="absolute bottom-4 left-4 right-4">
+                            <p className="text-sm font-semibold text-white">Persona başlangıç görseli hazır</p>
+                            <p className="mt-1 text-xs text-emerald-100/80">
+                              Video motoru bu kareyi kilit referans olarak kullanıyor.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 border-t border-white/10 bg-white/[0.03] text-center text-[11px] font-medium text-gray-300">
+                          <div className="border-r border-white/10 px-3 py-2 text-emerald-200">Persona kilitli</div>
+                          <div className="border-r border-white/10 px-3 py-2 text-cyan-200">Ürün/kimlik korunuyor</div>
+                          <div className="px-3 py-2 text-purple-200">Video hazırlanıyor</div>
+                        </div>
+                      </div>
+                    )}
+                    <div className={`relative flex ${generatedImageUrl ? 'h-20 w-20' : 'h-28 w-28'} items-center justify-center rounded-full bg-black/50 border border-white/10 shadow-[0_0_40px_rgba(124,58,237,0.2)]`}>
                       <div className="absolute inset-0 rounded-full border-t-4 border-r-4 border-blue-400 animate-spin"></div>
                       <div className="absolute inset-3 rounded-full border-b-4 border-l-4 border-purple-400 animate-[spin_1.5s_linear_infinite_reverse]"></div>
                       <div className="absolute inset-6 rounded-full border-t-4 border-l-4 border-pink-400 animate-[spin_2s_linear_infinite]"></div>
@@ -619,7 +1027,7 @@ export default function VideoPage() {
                 </div>
               )}
 
-              {!isGenerating && hasGenerated && videoUrl && (
+              {showVideoPanel && videoUrl && (
                 <div className="flex flex-col gap-4">
                   {/* Video Tabs: only when face swap was applied (backend returned both URLs) */}
                   {originalVideoUrl && (
@@ -706,93 +1114,69 @@ export default function VideoPage() {
               )}
 
               {isMenuOpen && (
-                <div className="absolute left-4 top-16 z-10 w-72 max-h-[80vh] overflow-y-auto rounded-xl border border-white/10 bg-[#0b0b0b] shadow-xl">
-                  <div className="sticky top-0 bg-[#0b0b0b] p-3 text-xs uppercase tracking-wide text-gray-500 border-b border-white/10 z-10">
-                    Settings
+                <div className="absolute left-4 top-16 z-10 flex max-h-[80vh] w-80 flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b0b]/95 shadow-2xl backdrop-blur-xl">
+                  <div className="flex items-center justify-between border-b border-white/10 px-4 pt-3 pb-2">
+                    <span className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">Settings</span>
+                    <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium text-cyan-200">{selectedQuality}</span>
                   </div>
-                  
-                  {/* Engine Selection - Always Open */}
+                  <div className="flex gap-1 border-b border-white/10 p-2">
+                    {([
+                      { id: 'engine', label: 'Engine' },
+                      { id: 'format', label: 'Duration & Quality' },
+                      { id: 'persona', label: 'Persona' },
+                    ] as const).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setSettingsTab(tab.id)}
+                        className={`flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all ${
+                          settingsTab === tab.id
+                            ? 'bg-white/10 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.15)]'
+                            : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+
+                  {/* Engine Selection */}
+                  {settingsTab === 'engine' && (
                   <div className="border-b border-white/10">
                     <div className="px-4 py-3">
-                      <div className="mb-2 text-xs font-medium text-gray-400">Video Motoru</div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('grok')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'grok'
-                              ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          ⚡ Standard (Grok)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('veo')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'veo'
-                              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          🎬 Premium (Veo 3.1)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('runway')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'runway'
-                              ? 'bg-amber-500/20 text-amber-200 border border-amber-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          👑 Ultra Premium (Runway)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('kling_3_pro')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'kling_3_pro'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          🎥 Kling 3.0 Pro (Video)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('kling_turbo')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'kling_turbo'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          🚀 ProTurbo (Kling 2.5 Turbo Pro)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('kling_2_6')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'kling_2_6'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          🎞️ Kling 2.6 (Video)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEngine('kling_avatar_v2')}
-                          className={`w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left ${
-                            selectedEngine === 'kling_avatar_v2'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                              : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          🎭 Kling Avatar v2 (Lip-Sync)
-                        </button>
+                      <div className="mb-2 text-xs font-medium text-gray-400">Video Engine</div>
+                      <div className="flex flex-col gap-1.5">
+                        {VIDEO_ENGINE_ITEMS.map((item) => {
+                          const active = selectedEngine === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => setSelectedEngine(item.id)}
+                              className={`group flex w-full items-center gap-3 rounded-xl border px-2.5 py-2 text-left transition-all ${
+                                active
+                                  ? item.accent
+                                  : 'border-white/10 bg-white/5 text-gray-300 hover:bg-white/10'
+                              }`}
+                            >
+                              <span
+                                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${item.tile} text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.25)] transition ${
+                                  active ? 'ring-2 ring-white/30' : 'opacity-90 group-hover:opacity-100'
+                                }`}
+                              >
+                                <EngineGlyph id={item.id} />
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-xs font-semibold leading-tight">{item.name}</span>
+                                {item.hint && (
+                                  <span className="block truncate text-[10px] leading-tight text-gray-500">{item.hint}</span>
+                                )}
+                              </span>
+                              {active && <CheckCircle2 className="h-4 w-4 shrink-0 opacity-80" />}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
@@ -817,16 +1201,21 @@ export default function VideoPage() {
                         </p>
                       </div>
                     )}
+                  </div>
+                  )}
 
+                  {/* Format: Duration + Quality */}
+                  {settingsTab === 'format' && (
+                  <div className="border-b border-white/10">
                     {/* Duration */}
-                    <div className="px-4 pb-4">
-                      <div className="mb-2 text-xs font-medium text-gray-400">Süre (Duration)</div>
+                    <div className="px-4 pt-4 pb-4">
+                      <div className="mb-2 text-xs font-medium text-gray-400">Duration</div>
                       {(() => {
                         const cfg = VIDEO_ENGINES_CONFIG[selectedEngine];
                         if (cfg.mode === 'auto' || cfg.supportedDurations.length === 0) {
                           return (
                             <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-400">
-                              Otomatik {cfg.note ? `— ${cfg.note}` : ''}
+                              Auto {cfg.note ? `— ${cfg.note}` : ''}
                             </div>
                           );
                         }
@@ -845,7 +1234,7 @@ export default function VideoPage() {
                                     ? 'bg-white/10 text-white border border-white/20'
                                     : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
                                 } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
-                                title={disabled ? 'Bu motor tek süre destekliyor.' : undefined}
+                                title={disabled ? 'This engine supports only one duration.' : undefined}
                               >
                                 {s}s
                               </button>
@@ -857,7 +1246,7 @@ export default function VideoPage() {
 
                     {/* Quality */}
                     <div className="px-4 pb-4">
-                      <div className="mb-2 text-xs font-medium text-gray-400">Kalite</div>
+                      <div className="mb-2 text-xs font-medium text-gray-400">Quality</div>
                       <div className="grid grid-cols-1 gap-2">
                         {VIDEO_ENGINES_CONFIG[selectedEngine].supportedQualities.map((q) => {
                           const meta = VIDEO_QUALITY_PRESET_LABELS[q];
@@ -881,7 +1270,11 @@ export default function VideoPage() {
                       </div>
                     </div>
                   </div>
-                  
+                  )}
+
+                  {/* Persona tab: Face Swap + Visual Persona + Upload */}
+                  {settingsTab === 'persona' && (
+                  <>
                   {/* Face Swap Section - Accordion */}
                   {faceSwapUiEnabled && (
                   <div className="border-b border-white/10">
@@ -1041,7 +1434,7 @@ export default function VideoPage() {
                           })
                         ) : (
                           <p className="text-xs text-gray-500 italic px-2">
-                            Prompt'tan karakter tespit edilemedi. Lütfen karakter isimlerini açıkça belirtin (örn: "Superman vs Thor").
+                            {"Prompt'tan karakter tespit edilemedi. Lütfen karakter isimlerini açıkça belirtin (örn: \"Superman vs Thor\")."}
                           </p>
                         )}
                       </div>
@@ -1086,9 +1479,9 @@ export default function VideoPage() {
                             >
                               <div className="flex w-full items-center gap-3 text-left text-sm text-white">
                                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500/80 to-sky-500/80 text-[10px] font-semibold text-white">
-                                  {option.name.trim().charAt(0).toUpperCase() || 'P'}
+                                  {(option.name || option.triggerWord || 'P').trim().charAt(0).toUpperCase() || 'P'}
                                 </span>
-                                <span className="truncate">{option.name}</span>
+                                <span className="truncate">{option.name || option.triggerWord || 'Untitled persona'}</span>
                               </div>
                             </div>
                           ))}
@@ -1103,9 +1496,9 @@ export default function VideoPage() {
                               className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-gray-500 opacity-70"
                             >
                               <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[10px] font-semibold text-white/60">
-                                {option.name.trim().charAt(0).toUpperCase() || 'P'}
+                                {(option.name || option.triggerWord || 'P').trim().charAt(0).toUpperCase() || 'P'}
                               </span>
-                              <span className="truncate">{option.name}</span>
+                              <span className="truncate">{option.name || option.triggerWord || 'Untitled persona'}</span>
                               <span className="ml-auto text-[10px] uppercase text-white/40">
                                 {option.status || 'training'}
                               </span>
@@ -1126,6 +1519,9 @@ export default function VideoPage() {
                       <ImagePlus className="h-4 w-4 text-gray-400" />
                       <span>Upload Image</span>
                     </button>
+                  </div>
+                  </>
+                  )}
                   </div>
                 </div>
               )}

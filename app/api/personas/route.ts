@@ -1,10 +1,11 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { requireAuthenticatedUser } from '@/lib/auth-user';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -16,7 +17,15 @@ export async function GET(request: Request) {
       return NextResponse.json([], { status: 200 });
     }
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    const userId = new URL(request.url).searchParams.get('userId');
+
+    // Account isolation: require a verified identity and always scope to the
+    // caller's own id. Only admins may inspect another user via ?userId=.
+    const auth = await requireAuthenticatedUser(request);
+    if (!auth.ok) {
+      return NextResponse.json([], { status: 200 });
+    }
+    const requestedUserId = request.nextUrl.searchParams.get('userId');
+    const userId = auth.isAdmin && requestedUserId ? requestedUserId : auth.userId;
 
     try {
       let modelQuery = supabase

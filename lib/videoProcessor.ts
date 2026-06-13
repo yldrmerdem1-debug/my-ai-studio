@@ -25,6 +25,12 @@ export type VideoProcessorResult = {
 
 const isDataUrl = (value: string) => value.startsWith('data:');
 
+const formatFfmpegError = (error: unknown, stdout?: unknown, stderr?: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const details = String(stderr || stdout || '');
+  return `${message}\n${details}`;
+};
+
 const bufferFromDataUrl = (dataUrl: string) => {
   const commaIndex = dataUrl.indexOf(',');
   if (commaIndex === -1) {
@@ -152,9 +158,8 @@ const mergeVideoAndAudio = async (videoPath: string, audioPath: string) => {
         '-c:a aac',
       ])
       .on('end', () => resolve())
-      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
-        const details = stderr || stdout || '';
-        reject(new Error(`FFmpeg merge failed: ${error?.message || error}\n${details}`));
+      .on('error', (error: unknown, stdout?: unknown, stderr?: unknown) => {
+        reject(new Error(`FFmpeg merge failed: ${formatFfmpegError(error, stdout, stderr)}`));
       })
       .save(outputPath);
   });
@@ -224,11 +229,10 @@ export const mixVideoWithVoiceAndSfx = async ({
         `[1:a]volume=${voiceVolume}[voice]`,
         `[2:a]volume=${sfxVolume}[sfx]`,
         '[voice][sfx]amix=inputs=2:normalize=0[aout]',
-      ])
+      ].join(';'))
       .on('end', () => resolve())
-      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
-        const details = stderr || stdout || '';
-        reject(new Error(`FFmpeg mix failed: ${error?.message || error}\n${details}`));
+      .on('error', (error: unknown, stdout?: unknown, stderr?: unknown) => {
+        reject(new Error(`FFmpeg mix failed: ${formatFfmpegError(error, stdout, stderr)}`));
       })
       .save(outputPath);
   });
@@ -314,11 +318,10 @@ export const mixVideoWithDucking = async ({
         `[2:a]volume=${sfxBedVolume}[bg]`,
         `[voice][bg]amix=inputs=2:duration=longest:dropout_transition=2[aout]`,
         `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
-      ])
+      ].join(';'))
       .on('end', () => resolve())
-      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
-        const details = stderr || stdout || '';
-        reject(new Error(`FFmpeg ducking mix failed: ${error?.message || error}\n${details}`));
+      .on('error', (error: unknown, stdout?: unknown, stderr?: unknown) => {
+        reject(new Error(`FFmpeg ducking mix failed: ${formatFfmpegError(error, stdout, stderr)}`));
       })
       .save(outputPath);
   });
@@ -379,11 +382,10 @@ export const mergeVideoWithAudioUrl = async ({
         `[0:v]noise=alls=10:allf=t+u,vignette=PI/4,fade=t=out:st=${fadeOutStart}:d=1[outv]`,
         `[1:a]volume=${audioVolume},acompressor=threshold=0.1:ratio=3:attack=20:release=250[aout]`,
         `[aout]apad=pad_dur=${durationSeconds},atrim=duration=${durationSeconds},afade=t=out:st=${fadeOutStart}:d=1[finala]`,
-      ])
+      ].join(';'))
       .on('end', () => resolve())
-      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
-        const details = stderr || stdout || '';
-        reject(new Error(`FFmpeg merge failed: ${error?.message || error}\n${details}`));
+      .on('error', (error: unknown, stdout?: unknown, stderr?: unknown) => {
+        reject(new Error(`FFmpeg merge failed: ${formatFfmpegError(error, stdout, stderr)}`));
       })
       .save(outputPath);
   });
@@ -422,9 +424,8 @@ export const concatVideos = async (videoUrls: string[]): Promise<string> => {
         '-movflags', '+faststart',
       ])
       .on('end', () => resolve())
-      .on('error', (error: Error, stdout: string | null, stderr: string | null) => {
-        const details = stderr || stdout || '';
-        reject(new Error(`FFmpeg concat failed: ${error?.message || error}\n${details}`));
+      .on('error', (error: unknown, stdout?: unknown, stderr?: unknown) => {
+        reject(new Error(`FFmpeg concat failed: ${formatFfmpegError(error, stdout, stderr)}`));
       })
       .save(outputPath);
   });

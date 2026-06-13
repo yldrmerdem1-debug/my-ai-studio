@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ComponentType } from 'react';
 import { SiOpenai, SiFlux, SiElevenlabs } from 'react-icons/si';
-import { Sparkles, Film, PlayCircle, Zap, Video, FileText, Upload, BrainCircuit, Image } from 'lucide-react';
+import { Sparkles, Film, PlayCircle, Zap, Video, FileText, Upload, BrainCircuit, Image, Wand2, ShieldCheck, Rocket } from 'lucide-react';
 import Sidebar from '@/components/Sidebar';
 import PricingModal from '@/components/PricingModal';
 import HeroSection from '@/components/HeroSection';
@@ -123,7 +123,7 @@ type FeatureCardProps = {
 const FeatureCard = ({ feature }: FeatureCardProps) => {
   return (
     <div
-      className="group perf-card rounded-2xl border border-white/10 bg-white/5 overflow-hidden"
+      className="group perf-card overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-[0_18px_70px_rgba(0,0,0,0.22)] transition-all duration-300 hover:-translate-y-1 hover:border-cyan-300/30 hover:shadow-[0_24px_90px_rgba(0,217,255,0.12)]"
     >
       <div className="relative aspect-video">
         {feature.kind === "before-after" ? (
@@ -158,9 +158,9 @@ const FeatureCard = ({ feature }: FeatureCardProps) => {
           />
         )}
       </div>
-      <div className="p-6 space-y-2">
+      <div className="space-y-2 border-t border-white/10 bg-black/20 p-6">
         <h3 className="text-xl font-semibold text-white">{feature.title}</h3>
-        <p className="text-white">{feature.description}</p>
+        <p className="text-sm text-gray-300">{feature.description}</p>
       </div>
     </div>
   );
@@ -256,6 +256,9 @@ export default function Home() {
               'radial-gradient(circle at 20% 20%, rgba(0, 217, 255, 0.08), transparent 45%), radial-gradient(circle at 80% 70%, rgba(0, 153, 255, 0.08), transparent 50%), radial-gradient(circle at 50% 50%, rgba(139, 92, 246, 0.06), transparent 55%)',
           }}
         />
+        {/* Subtle twinkling starfield (pure CSS gradients, GPU-cheap) */}
+        <div className="aurora-stars--far" />
+        <div className="aurora-stars" />
       </div>
 
       {/* Sidebar - Hidden initially, appears after hero */}
@@ -278,13 +281,14 @@ export default function Home() {
 
         {/* Section 2 - What Happens Next */}
         {/* perf-section keeps offscreen content from painting during scroll */}
-        <section className="relative py-24 px-8 perf-section">
+        <section className="relative px-8 py-24 perf-section">
+          <div className="pointer-events-none absolute inset-x-10 top-10 h-px bg-gradient-to-r from-transparent via-cyan-300/20 to-transparent" />
           <div className="container mx-auto max-w-6xl">
             <div className="text-center mb-12">
               <h2 className="text-3xl lg:text-4xl font-bold text-white mb-4">
                 What Happens Next
               </h2>
-              <p className="text-lg text-white max-w-2xl mx-auto">
+              <p className="text-lg text-gray-300 max-w-2xl mx-auto">
                 A simple flow that turns you into a reusable AI persona.
               </p>
             </div>
@@ -293,11 +297,11 @@ export default function Home() {
               {FLOW_STEPS.map((step) => (
                 <div
                   key={step.title}
-                  className="rounded-2xl border border-white/10 bg-white/5 p-8 text-center space-y-4"
+                  className="group rounded-3xl border border-white/10 bg-white/[0.045] p-8 text-center shadow-[0_18px_60px_rgba(0,0,0,0.18)] transition-all duration-300 hover:-translate-y-1 hover:border-cyan-300/25 hover:bg-white/[0.065]"
                 >
                   <div className="flex items-center justify-center">
                     {step.icon ? (
-                      <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/10 border border-white/10">
+                      <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-cyan-300/10 border border-cyan-300/20 text-cyan-100 transition group-hover:shadow-[0_0_28px_rgba(0,217,255,0.18)]">
                         <step.icon className="w-6 h-6 text-white" />
                       </div>
                     ) : (
@@ -305,7 +309,7 @@ export default function Home() {
                         {step.icons?.map((Icon, iconIndex) => (
                           <div
                             key={`${step.title}-${iconIndex}`}
-                            className="flex items-center justify-center w-10 h-10 rounded-lg bg-white/10 border border-white/10"
+                            className="flex items-center justify-center w-10 h-10 rounded-xl bg-cyan-300/10 border border-cyan-300/20"
                           >
                             <Icon className="w-5 h-5 text-white" />
                           </div>
@@ -314,7 +318,7 @@ export default function Home() {
                     )}
                   </div>
                   <h3 className="text-xl font-semibold text-white">{step.title}</h3>
-                  <p className="text-white">{step.label}</p>
+                  <p className="text-sm text-gray-300">{step.label}</p>
                 </div>
               ))}
             </div>
@@ -324,12 +328,13 @@ export default function Home() {
         {/* Section 3 - Feature Previews */}
         {/* perf-section keeps offscreen content from painting during scroll */}
         <section className="relative py-24 px-8 perf-section">
+          <div className="pointer-events-none absolute left-1/2 top-24 h-72 w-72 -translate-x-1/2 rounded-full bg-cyan-300/[0.04] blur-3xl" />
           <div className="container mx-auto max-w-6xl">
             <div className="text-center mb-14">
               <h2 className="text-3xl lg:text-4xl font-bold text-white mb-4">
                 Output-First Results
               </h2>
-              <p className="text-lg text-white">
+              <p className="text-lg text-gray-300">
                 Final results only — no UI walkthroughs, no screen recordings.
               </p>
             </div>
@@ -349,26 +354,48 @@ export default function Home() {
         {/* perf-section keeps offscreen content from painting during scroll */}
         <section className="relative py-20 px-8 perf-section">
           <div className="container mx-auto max-w-5xl">
-            <div className="text-center mb-10">
+            <div className="text-center mb-12">
               <h2 className="text-3xl lg:text-4xl font-bold text-white mb-4">
                 Why It&apos;s Different
               </h2>
-              <p className="text-lg text-white">
-                Focus on creative output, not complexity.
+              <p className="text-lg text-gray-300">
+                Studio-quality content with your identity — without the studio, the agency, or the prompts.
               </p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-white">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {[
-                'No prompts. Just results.',
-                'One AI persona, trained once, used everywhere.',
-                'Consistent face, style, and identity',
-                'Built for creators, not engineers',
+                {
+                  icon: Wand2,
+                  title: 'No prompts. Just results.',
+                  desc: 'Skip the prompt engineering. Pick a look, hit generate, and get a finished, ad-ready shot.',
+                },
+                {
+                  icon: BrainCircuit,
+                  title: 'Train once, use everywhere.',
+                  desc: 'One AI persona powers your images, videos, and product ads — no retraining for every project.',
+                },
+                {
+                  icon: ShieldCheck,
+                  title: 'Your face stays your face.',
+                  desc: 'Identity-locked output keeps facial features, style, and product details consistent across every render.',
+                },
+                {
+                  icon: Rocket,
+                  title: 'Built for creators, not engineers.',
+                  desc: 'No technical setup. If you can upload photos, you can ship professional content.',
+                },
               ].map((item) => (
                 <div
-                  key={item}
-                  className="rounded-2xl border border-white/10 bg-white/5 p-6 text-lg"
+                  key={item.title}
+                  className="group flex items-start gap-4 rounded-3xl border border-white/10 bg-white/[0.045] p-6 transition-all duration-300 hover:-translate-y-1 hover:border-cyan-300/25 hover:bg-white/[0.065] hover:shadow-[0_18px_60px_rgba(0,217,255,0.10)]"
                 >
-                  {item}
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition group-hover:shadow-[0_0_24px_rgba(0,217,255,0.25)]">
+                    <item.icon className="h-5 w-5" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="text-lg font-semibold text-white">{item.title}</h3>
+                    <p className="text-sm leading-relaxed text-gray-300">{item.desc}</p>
+                  </div>
                 </div>
               ))}
             </div>

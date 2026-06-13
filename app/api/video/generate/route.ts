@@ -22,6 +22,8 @@ const replicate = new Replicate({
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
+const safeTrim = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
 const isReadableStream = (value: any): value is ReadableStream => {
   return value && typeof value.getReader === 'function';
 };
@@ -355,6 +357,12 @@ export async function POST(req: Request) {
     const personaPool = [...providedPersonas, ...loadedPersonas];
     const hfUrls = uniqStrings(personaPool.map((p) => (p as any)?.huggingFaceUrl || (p as any)?.huggingface_url))
       .map(withDownloadTrue);
+    const configuredMultiLoraModel = safeTrim(process.env.REPLICATE_FLUX_MULTI_LORA_MODEL);
+    const shouldUseMultiLoraEndpoint =
+      hfUrls.length > 1
+      && Boolean(configuredMultiLoraModel)
+      && configuredMultiLoraModel !== 'lucataco/flux-dev-multi-lora';
+    const primaryHfUrl = hfUrls[0] || '';
     const triggerWords = uniqStrings([triggerWord, ...personaPool.map((p) => p?.triggerWord || '')]);
 
     const preferredModel = 'gemini-2.5-flash';
@@ -385,10 +393,9 @@ export async function POST(req: Request) {
 
       // If we have HF LoRA(s) selected, generate the keyframe using a LoRA-capable Flux endpoint.
       if (hfUrls.length > 0) {
-        const model =
-          hfUrls.length > 1
-            ? (process.env.REPLICATE_FLUX_MULTI_LORA_MODEL || 'lucataco/flux-dev-multi-lora')
-            : (process.env.REPLICATE_FLUX_LORA_MODEL || 'black-forest-labs/flux-dev-lora');
+        const model = shouldUseMultiLoraEndpoint
+          ? configuredMultiLoraModel
+          : (process.env.REPLICATE_FLUX_LORA_MODEL || 'black-forest-labs/flux-dev-lora');
         const fluxBasePrompt = useContextPrompt ? promptForImage : rawPrompt.trim();
         const fluxInputPrompt = useContextPrompt
           ? fluxBasePrompt
@@ -397,17 +404,17 @@ export async function POST(req: Request) {
 
         let imageOutput: any = null;
         try {
-          if (hfUrls.length > 1) {
+          if (shouldUseMultiLoraEndpoint) {
             imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, hf_loras: hfUrls, aspect_ratio: '16:9', output_format: 'png', output_quality: 100, num_inference_steps: 50 } });
           } else {
-            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 1.0, aspect_ratio: '16:9', output_format: 'png', output_quality: 100, num_inference_steps: 50 } });
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: primaryHfUrl, lora_scale: 1.0, aspect_ratio: '16:9', output_format: 'png', output_quality: 100, num_inference_steps: 50 } });
           }
         } catch (error: any) {
           // Fallback to minimal inputs if the model rejects extra fields
-          if (hfUrls.length > 1) {
+          if (shouldUseMultiLoraEndpoint) {
             imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, hf_loras: hfUrls } });
           } else {
-            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: hfUrls[0], lora_scale: 1.0 } });
+            imageOutput = await replicate.run(model as any, { input: { prompt: loraPrompt, lora_weights: primaryHfUrl, lora_scale: 1.0 } });
           }
         }
 

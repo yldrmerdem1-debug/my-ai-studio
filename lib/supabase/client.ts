@@ -10,6 +10,33 @@ const createNoopClient = () => {
   };
   return {
     from: () => noopQuery,
+    auth: {
+      getSession: async () => ({ data: { session: null }, error: null }),
+      signInWithPassword: async () => ({
+        data: { user: null, session: null },
+        error: { message: 'Supabase client is not configured' },
+      }),
+      signUp: async () => ({
+        data: { user: null, session: null },
+        error: { message: 'Supabase client is not configured' },
+      }),
+      resend: async () => ({
+        data: null,
+        error: { message: 'Supabase client is not configured' },
+      }),
+      resetPasswordForEmail: async () => ({
+        data: null,
+        error: { message: 'Supabase client is not configured' },
+      }),
+      updateUser: async () => ({
+        data: { user: null },
+        error: { message: 'Supabase client is not configured' },
+      }),
+      signOut: async () => ({ error: null }),
+      onAuthStateChange: () => ({
+        data: { subscription: { unsubscribe: () => undefined } },
+      }),
+    },
   } as unknown as SupabaseClient;
 };
 

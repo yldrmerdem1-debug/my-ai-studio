@@ -207,8 +207,8 @@ const extractXaiText = (payload: any): string => {
 };
 
 async function callGrokWithTimeout(systemPrompt: string, userPrompt: string, timeoutMs: number): Promise<string> {
-  const key = String(process.env.GROK_API_KEY || '').trim();
-  if (!key) throw new Error('GROK_API_KEY missing');
+  const key = String(process.env.GROK_API_KEY || process.env.XAI_API_KEY || '').trim();
+  if (!key) throw new Error('GROK_API_KEY or XAI_API_KEY missing');
 
   const baseUrl = String(process.env.GROK_API_BASE_URL || process.env.XAI_API_BASE_URL || 'https://api.x.ai/v1').trim().replace(/\/+$/, '');
   const model = String(process.env.GROK_MODEL || 'grok-4-1-fast-non-reasoning').trim();
