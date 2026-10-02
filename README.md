@@ -49,6 +49,13 @@ The app also includes helper workflows for:
 - studio image generation
 - video packaging / auto-editor style flows
 
+## What I Built
+- A multi-provider generation layer (Replicate, fal.ai, Gemini) behind one model registry, with async job tracking and status polling for long video renders
+- Persona training end to end: dataset preparation, LoRA training, weight hosting and reuse across image and video flows
+- Post-processing with ffmpeg and provider models: face swap, lip sync, audio merge, background change
+- A production storage split: metadata in Supabase, heavy media in Cloudflare R2, model weights on Hugging Face
+- Ad tooling on top: script generation, creative direction and an auto-editor that turns a brief into scenes
+
 ## Tech Stack
 - `Next.js` for the app and API routes
 - `React` for the client UI
